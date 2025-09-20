@@ -1,0 +1,11 @@
+# 电流测试板卡上位机依赖包
+pyusb>=1.2.1
+pyserial>=3.5
+colorama>=0.4.6
+pyinstaller>=5.0.0
+
+# 开发和测试依赖
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=22.0.0
+flake8>=5.0.0
