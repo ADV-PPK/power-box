@@ -15,7 +15,6 @@
     python main.py measure                   # 单次测量
     python main.py monitor -t 10             # 监测10秒
     python main.py board-id                  # 读取板卡ID
-    python main.py relay on                  # 打开继电器
 """
 
 import sys

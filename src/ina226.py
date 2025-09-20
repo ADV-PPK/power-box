@@ -165,9 +165,12 @@ class INA226:
             return True
         return False
     
-    def check_device(self) -> bool:
+    def check_device(self, silent: bool = False) -> bool:
         """
         检查设备是否为INA226
+        
+        Args:
+            silent: 静默模式，失败时不打印错误信息
         
         Returns:
             bool: 是INA226返回True
@@ -176,22 +179,26 @@ class INA226:
             # 读取制造商ID
             manufacturer_id = self._read_register(self.REG_MANUFACTURER_ID)
             if manufacturer_id != self.MANUFACTURER_ID:
-                logger.error(f"制造商ID不匹配: 期望0x{self.MANUFACTURER_ID:04X}, "
-                           f"实际0x{manufacturer_id:04X}")
+                if not silent:
+                    logger.error(f"制造商ID不匹配: 期望0x{self.MANUFACTURER_ID:04X}, "
+                               f"实际0x{manufacturer_id:04X}")
                 return False
             
             # 读取器件ID
             die_id = self._read_register(self.REG_DIE_ID)
             if die_id != self.DIE_ID:
-                logger.error(f"器件ID不匹配: 期望0x{self.DIE_ID:04X}, "
-                           f"实际0x{die_id:04X}")
+                if not silent:
+                    logger.error(f"器件ID不匹配: 期望0x{self.DIE_ID:04X}, "
+                               f"实际0x{die_id:04X}")
                 return False
             
-            logger.info("成功识别INA226器件")
+            if not silent:
+                logger.info("成功识别INA226器件")
             return True
             
         except Exception as e:
-            logger.error(f"设备检查异常: {e}")
+            if not silent:
+                logger.error(f"设备检查异常: {e}")
             return False
     
     def configure(self, config: int = DEFAULT_CONFIG) -> bool:
@@ -412,7 +419,7 @@ def scan_ina226_devices(ch341_device: CH341Device) -> list:
     for addr in possible_addresses:
         try:
             ina226 = INA226(ch341_device, addr)
-            if ina226.check_device():
+            if ina226.check_device(silent=True):  # 使用静默模式
                 devices.append(addr)
                 logger.info(f"发现INA226设备: 0x{addr:02X}")
         except Exception as e:

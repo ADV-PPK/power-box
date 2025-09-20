@@ -163,12 +163,13 @@ class CH341Device:
         """检查设备是否已打开"""
         return self.device_handle is not None
             
-    def open(self, skip_scan: bool = True) -> bool:
+    def open(self, skip_scan: bool = True, silent: bool = False) -> bool:
         """
         打开CH341设备
         
         Args:
             skip_scan: 是否跳过I2C设备扫描
+            silent: 静默模式，失败时不打印错误信息
             
         Returns:
             bool: 成功返回True，失败返回False
@@ -178,14 +179,16 @@ class CH341Device:
                 return True
                 
             if not self._dll:
-                logger.error("CH341 DLL未正确加载")
+                if not silent:
+                    logger.error("CH341 DLL未正确加载")
                 return False
                 
             # 打开设备
             self.device_handle = self._dll.CH341OpenDevice(self.device_index)
             if not self._dll.CH341ResetDevice(self.device_handle):
                 self.device_handle = None
-                logger.error(f"无法打开CH341设备 {self.device_index}")
+                if not silent:
+                    logger.error(f"无法打开CH341设备 {self.device_index}")
                 return False
                 
             logger.info("Device opened successfully")
@@ -753,7 +756,7 @@ def get_device_count() -> int:
         for i in range(16):  # 最多检查16个设备
             try:
                 device = CH341Device(i)
-                if device.open():
+                if device.open(silent=True):  # 使用静默模式
                     count += 1
                     device.close()
                 else:

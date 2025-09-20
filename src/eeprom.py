@@ -392,9 +392,12 @@ class EEPROM:
         
         return "\\n".join(result)
     
-    def test_device(self) -> bool:
+    def test_device(self, silent: bool = False) -> bool:
         """
         测试EEPROM设备是否可访问
+        
+        Args:
+            silent: 静默模式，失败时不打印错误信息
         
         Returns:
             bool: 可访问返回True
@@ -403,14 +406,17 @@ class EEPROM:
             # 尝试读取第一个字节
             test_byte = self.read_byte(0)
             if test_byte is not None:
-                logger.info(f"EEPROM设备测试成功: 地址0x{self.address:02X}")
+                if not silent:
+                    logger.info(f"EEPROM设备测试成功: 地址0x{self.address:02X}")
                 return True
             else:
-                logger.error(f"EEPROM设备测试失败: 地址0x{self.address:02X}")
+                if not silent:
+                    logger.error(f"EEPROM设备测试失败: 地址0x{self.address:02X}")
                 return False
                 
         except Exception as e:
-            logger.error(f"EEPROM设备测试异常: {e}")
+            if not silent:
+                logger.error(f"EEPROM设备测试异常: {e}")
             return False
     
     def get_info(self) -> dict:
@@ -429,12 +435,16 @@ class EEPROM:
         }
 
 
-def scan_eeprom_devices(ch341_device: CH341Device) -> List[int]:
+def scan_eeprom_devices(ch341_device: CH341Device, method: str = 'read_probe') -> List[int]:
     """
     扫描I2C总线上的EEPROM设备
     
     Args:
         ch341_device: CH341设备实例
+        method: 扫描方法，可选值：
+               'read_probe' - 纯读取探测（推荐，非破坏性）
+               'write_test' - 写入测试验证（较可靠，但会修改EEPROM内容）
+               'class_test' - 使用EEPROM类测试（兼容性最好）
         
     Returns:
         list: 发现的EEPROM设备地址列表
@@ -444,16 +454,80 @@ def scan_eeprom_devices(ch341_device: CH341Device) -> List[int]:
     # EEPROM常见地址范围
     possible_addresses = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57]
     
-    logger.info("扫描EEPROM设备...")
+    logger.info(f"扫描EEPROM设备(方法: {method})...")
     
     for addr in possible_addresses:
+        found = False
         try:
-            eeprom = EEPROM(ch341_device, addr)
-            if eeprom.test_device():
+            if method == 'read_probe':
+                # 方法1: 使用i2c_write_read进行读取探测（非破坏性）
+                try:
+                    # 尝试从地址0读取1字节
+                    data = ch341_device.i2c_write_read(addr, [0x00], 1)
+                    if data and len(data) == 1 and data[0] != 0xFF:
+                        # 二次确认减少噪声
+                        data2 = ch341_device.i2c_write_read(addr, [0x00], 1)
+                        if data2 and len(data2) == 1 and data2[0] == data[0]:
+                            found = True
+                            logger.info(f"发现EEPROM设备(读取探测): 0x{addr:02X}")
+                except:
+                    pass
+                    
+            elif method == 'write_test':
+                # 方法2: 使用写入测试验证（会修改EEPROM内容）
+                try:
+                    # 先读取原始值
+                    original_value = None
+                    try:
+                        orig_data = ch341_device.i2c_write_read(addr, [0x00], 1)
+                        if orig_data and len(orig_data) == 1:
+                            original_value = orig_data[0]
+                    except:
+                        pass
+                    
+                    # 写入测试值0xAA到地址0x00
+                    test_value = 0xAA
+                    if ch341_device.i2c_write_register(addr, 0x00, test_value):
+                        # 等待写入完成
+                        time.sleep(0.005)
+                        # 读取验证
+                        verify_data = ch341_device.i2c_write_read(addr, [0x00], 1)
+                        if verify_data and len(verify_data) == 1 and verify_data[0] == test_value:
+                            found = True
+                            logger.info(f"发现EEPROM设备(写入测试): 0x{addr:02X}")
+                            
+                            # 恢复原始值
+                            if original_value is not None:
+                                try:
+                                    ch341_device.i2c_write_register(addr, 0x00, original_value)
+                                    time.sleep(0.005)
+                                except:
+                                    pass
+                except:
+                    pass
+                    
+            elif method == 'class_test':
+                # 方法3: 使用EEPROM类的test_device方法（兼容性回退）
+                try:
+                    eeprom = EEPROM(ch341_device, addr)
+                    if eeprom.test_device(silent=True):  # 使用静默模式
+                        found = True
+                        logger.info(f"发现EEPROM设备(类测试): 0x{addr:02X}")
+                except Exception as e:
+                    logger.debug(f"地址0x{addr:02X}检查失败: {e}")
+            else:
+                logger.error(f"未知的扫描方法: {method}")
+                break
+            
+            if found:
                 devices.append(addr)
-                logger.info(f"发现EEPROM设备: 0x{addr:02X}")
-        except Exception as e:
-            logger.debug(f"地址0x{addr:02X}检查失败: {e}")
+            
+        except Exception:
+            # 忽略异常，继续扫描
+            pass
+        
+        # 添加小延迟提高总线可靠性
+        time.sleep(0.001)
     
     logger.info(f"扫描完成，发现{len(devices)}个EEPROM设备")
     return devices

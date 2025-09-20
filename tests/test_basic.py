@@ -39,14 +39,6 @@ class TestImports(unittest.TestCase):
         except ImportError as e:
             self.fail(f"EEPROM模块导入失败: {e}")
     
-    def test_import_relay(self):
-        """测试继电器模块导入"""
-        try:
-            from relay import RelayController, RelayState, PowerRelay
-            self.assertTrue(True)
-        except ImportError as e:
-            self.fail(f"继电器模块导入失败: {e}")
-    
     def test_import_cli(self):
         """测试CLI模块导入"""
         try:

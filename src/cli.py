@@ -5,7 +5,6 @@
 - 设备扫描和信息查询
 - 电流/电压测量
 - EEPROM读写操作
-- 继电器控制
 - 连续监测模式
 """
 
@@ -36,8 +35,6 @@ class CommandLineInterface:
         self.ch341 = None
         self.ina226 = None
         self.eeprom = None
-        self.relay_controller = None
-        self.power_relay = None
         
         self._setup_parser()
     
@@ -55,9 +52,6 @@ class CommandLineInterface:
   %(prog)s monitor -s 1000 -f data.json # 监测1000次，保存到文件
   %(prog)s board-id                      # 读取板卡ID
   %(prog)s board-id -w "PWR-BOX-001"     # 写入板卡ID
-  %(prog)s relay on                      # 打开继电器
-  %(prog)s relay off                     # 关闭继电器
-  %(prog)s relay pulse -d 2.0            # 脉冲控制2秒
             '''
         )
         
@@ -82,8 +76,12 @@ class CommandLineInterface:
         
         # scan命令
         scan_parser = subparsers.add_parser('scan', help='扫描设备')
-        scan_parser.add_argument('--type', choices=['all', 'ch341', 'ina226', 'eeprom', 'pcf8574'],
+        scan_parser.add_argument('--type', choices=['all', 'ch341', 'ina226', 'eeprom'],
                                default='all', help='扫描设备类型')
+        scan_parser.add_argument('--eeprom-method', choices=['read_probe', 'write_test', 'class_test'],
+                               default='write_test', help='EEPROM扫描方法 (默认: read_probe)')
+        scan_parser.add_argument('--verbose-scan', action='store_true',
+                               help='详细扫描输出模式')
         
         # info命令
         info_parser = subparsers.add_parser('info', help='显示设备信息')
@@ -137,31 +135,6 @@ class CommandLineInterface:
                                help='起始地址 (默认: 0x00)')
         dump_parser.add_argument('--length', type=int,
                                help='转储长度 (默认: 全部)')
-        
-        # relay命令
-        relay_parser = subparsers.add_parser('relay', help='继电器控制')
-        relay_subparsers = relay_parser.add_subparsers(dest='relay_action')
-        
-        # relay on
-        on_parser = relay_subparsers.add_parser('on', help='打开继电器')
-        on_parser.add_argument('--id', type=int, default=0, help='继电器ID')
-        
-        # relay off
-        off_parser = relay_subparsers.add_parser('off', help='关闭继电器')
-        off_parser.add_argument('--id', type=int, default=0, help='继电器ID')
-        
-        # relay toggle
-        toggle_parser = relay_subparsers.add_parser('toggle', help='切换继电器状态')
-        toggle_parser.add_argument('--id', type=int, default=0, help='继电器ID')
-        
-        # relay pulse
-        pulse_parser = relay_subparsers.add_parser('pulse', help='脉冲控制')
-        pulse_parser.add_argument('--id', type=int, default=0, help='继电器ID')
-        pulse_parser.add_argument('-d', '--duration', type=float, default=0.1,
-                                help='脉冲持续时间/秒 (默认: 0.1)')
-        
-        # relay status
-        status_parser = relay_subparsers.add_parser('status', help='查看继电器状态')
     
     def _parse_address(self, addr_str: str) -> int:
         """解析地址字符串（支持十六进制）"""
@@ -192,14 +165,12 @@ class CommandLineInterface:
             import ch341
             import ina226
             import eeprom 
-            import relay
         except ImportError:
             # 如果直接导入失败，尝试相对导入
             try:
                 from . import ch341
                 from . import ina226
                 from . import eeprom
-                from . import relay
             except ImportError:
                 # 最后尝试添加当前目录到路径
                 import sys
@@ -208,7 +179,6 @@ class CommandLineInterface:
                 import ch341
                 import ina226
                 import eeprom
-                import relay
 
         try:
             # 检查CH341设备
@@ -235,17 +205,6 @@ class CommandLineInterface:
             eeprom_addr = self._parse_address(args.eeprom_addr)
             self.eeprom = eeprom.EEPROM(self.ch341, eeprom_addr, args.eeprom_type)
             
-            # 初始化继电器控制器
-            try:
-                self.relay_controller = relay.create_relay_controller(
-                    self.ch341, relay.RelayControlMode.GPIO_DIRECT,
-                    pin_mapping={0: 0}
-                )
-                self.power_relay = relay.PowerRelay(self.relay_controller, 0)
-            except Exception as e:
-                if args.verbose:
-                    self._print_warning(f"继电器控制器初始化失败: {e}")
-            
             return True
             
         except Exception as e:
@@ -263,14 +222,12 @@ class CommandLineInterface:
             import ch341
             import ina226
             import eeprom
-            import relay
         except ImportError:
             # 如果直接导入失败，尝试相对导入
             try:
                 from . import ch341
                 from . import ina226
                 from . import eeprom
-                from . import relay
             except ImportError:
                 # 最后尝试添加当前目录到路径
                 import sys
@@ -279,19 +236,12 @@ class CommandLineInterface:
                 import ch341
                 import ina226
                 import eeprom
-                import relay
         
         if not self._init_devices(args):
             return 1
         
         try:
             print(f"{Fore.BLUE}=== 设备扫描结果 ==={Style.RESET_ALL}")
-            
-            if args.type in ['all', 'ch341']:
-                device_count = ch341.get_device_count()
-                print(f"CH341设备数量: {device_count}")
-                for i in range(device_count):
-                    print(f"  设备 {i}: 可用")
             
             if args.type in ['all', 'ina226']:
                 devices = ina226.scan_ina226_devices(self.ch341)
@@ -300,16 +250,16 @@ class CommandLineInterface:
                     print(f"  地址 0x{addr:02X}: INA226")
             
             if args.type in ['all', 'eeprom']:
-                devices = eeprom.scan_eeprom_devices(self.ch341)
-                print(f"EEPROM设备数量: {len(devices)}")
+                devices = eeprom.scan_eeprom_devices(self.ch341, args.eeprom_method)
+                print(f"EEPROM设备数量: {len(devices)} (方法: {args.eeprom_method})")
                 for addr in devices:
                     print(f"  地址 0x{addr:02X}: EEPROM")
             
-            if args.type in ['all', 'pcf8574']:
-                devices = relay.scan_pcf8574_devices(self.ch341)
-                print(f"PCF8574设备数量: {len(devices)}")
-                for addr in devices:
-                    print(f"  地址 0x{addr:02X}: PCF8574")
+            if args.type in ['all', 'ch341']:
+                device_count = ch341.get_device_count()
+                print(f"CH341设备数量: {device_count}")
+                for i in range(device_count):
+                    print(f"  设备 {i}: 可用")
             
             return 0
             
@@ -350,16 +300,6 @@ class CommandLineInterface:
                     print(f"  {key}: {value}")
             else:
                 print("\\nEEPROM设备: 未检测到")
-            
-            # 继电器信息
-            if self.relay_controller:
-                print("\\n继电器控制:")
-                print(f"  控制器类型: {type(self.relay_controller).__name__}")
-                if self.power_relay:
-                    state = self.power_relay.get_state()
-                    print(f"  电源状态: {state.name}")
-            else:
-                print("\\n继电器控制: 不可用")
             
             return 0
             
@@ -613,64 +553,6 @@ class CommandLineInterface:
         finally:
             self._cleanup_devices()
     
-    def cmd_relay(self, args) -> int:
-        """继电器控制命令"""
-        if not self._init_devices(args):
-            return 1
-        
-        try:
-            if not self.power_relay:
-                self._print_error("继电器控制器不可用")
-                return 1
-            
-            if args.relay_action == 'on':
-                if self.power_relay.enable():
-                    self._print_success("继电器已打开")
-                    return 0
-                else:
-                    self._print_error("继电器打开失败")
-                    return 1
-            
-            elif args.relay_action == 'off':
-                if self.power_relay.disable():
-                    self._print_success("继电器已关闭")
-                    return 0
-                else:
-                    self._print_error("继电器关闭失败")
-                    return 1
-            
-            elif args.relay_action == 'toggle':
-                if self.power_relay.toggle():
-                    state = self.power_relay.get_state()
-                    self._print_success(f"继电器已切换到{state.name}")
-                    return 0
-                else:
-                    self._print_error("继电器切换失败")
-                    return 1
-            
-            elif args.relay_action == 'pulse':
-                if self.power_relay.pulse(args.duration):
-                    self._print_success(f"脉冲控制完成 ({args.duration}秒)")
-                    return 0
-                else:
-                    self._print_error("脉冲控制失败")
-                    return 1
-            
-            elif args.relay_action == 'status':
-                state = self.power_relay.get_state()
-                print(f"继电器状态: {state.name}")
-                return 0
-            
-            else:
-                self._print_error("未知的继电器操作")
-                return 1
-            
-        except Exception as e:
-            self._print_error(f"继电器控制失败: {e}")
-            return 1
-        finally:
-            self._cleanup_devices()
-    
     def run(self, argv=None) -> int:
         """运行命令行接口"""
         try:
@@ -695,7 +577,6 @@ class CommandLineInterface:
                 'monitor': self.cmd_monitor,
                 'board-id': self.cmd_board_id,
                 'eeprom': self.cmd_eeprom,
-                'relay': self.cmd_relay,
             }
             
             if args.command in command_map:
