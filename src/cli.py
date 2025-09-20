@@ -67,12 +67,12 @@ class CommandLineInterface:
                                help='INA226 I2C地址 (默认: 0x40)')
         self.parser.add_argument('--eeprom-addr', type=str, default='0x50',
                                help='EEPROM I2C地址 (默认: 0x50)')
-        self.parser.add_argument('--eeprom-type', type=str, default='24C32',
-                               help='EEPROM型号 (默认: 24C32)')
-        self.parser.add_argument('--shunt-resistance', type=float, default=0.1,
-                               help='分流电阻阻值/欧姆 (默认: 0.1)')
-        self.parser.add_argument('--max-current', type=float, default=3.2,
-                               help='最大预期电流/安培 (默认: 3.2)')
+        self.parser.add_argument('--eeprom-type', type=str, default='24C02',
+                               help='EEPROM型号 (默认: 24C02)')
+        self.parser.add_argument('--shunt-resistance', type=float, default=10,
+                               help='分流电阻阻值/欧姆 (默认: 10)')
+        self.parser.add_argument('--max-current', type=float, default=0.8192,
+                               help='最大预期电流/安培 (默认: 0.8192)')
         
         # 子命令
         subparsers = self.parser.add_subparsers(dest='command', help='可用命令')
@@ -301,21 +301,21 @@ class CommandLineInterface:
             if self.ina226.check_device():
                 self.ina226.initialize(args.max_current)
                 info = self.ina226.get_info()
-                print("\\nINA226设备:")
+                print("INA226设备:")
                 for key, value in info.items():
                     print(f"  {key}: {value}")
             else:
-                print("\\nINA226设备: 未检测到")
+                print("INA226设备: 未检测到")
             
             # EEPROM信息
             if self.eeprom.test_device():
                 info = self.eeprom.get_info()
-                print("\\nEEPROM设备:")
+                print("EEPROM设备:")
                 for key, value in info.items():
                     print(f"  {key}: {value}")
             else:
-                print("\\nEEPROM设备: 未检测到")
-            
+                print("EEPROM设备: 未检测到")
+
             return 0
             
         except Exception as e:
@@ -445,7 +445,7 @@ class CommandLineInterface:
                         time.sleep(args.interval)
                         
             except KeyboardInterrupt:
-                print(f"\\n{Fore.YELLOW}监测被用户中断{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}监测被用户中断{Style.RESET_ALL}")
             
             # 保存数据到文件
             if args.file and measurements:
@@ -456,7 +456,7 @@ class CommandLineInterface:
                 except Exception as e:
                     self._print_error(f"保存文件失败: {e}")
             
-            print(f"\\n监测完成，共采集 {len(measurements)} 个数据点")
+            print(f"\n监测完成，共采集 {len(measurements)} 个数据点")
             return 0
             
         except Exception as e:
@@ -488,12 +488,14 @@ class CommandLineInterface:
             else:
                 # 读取板卡ID
                 board_id = self.eeprom.read_board_id(address)
-                if board_id:
-                    print(f"板卡ID: {board_id}")
-                    return 0
-                else:
+                if board_id is None:
                     self._print_error("读取板卡ID失败")
                     return 1
+                if board_id == "":
+                    print("板卡ID: (未设置)")
+                    return 0
+                print(f"板卡ID: {board_id}")
+                return 0
             
         except Exception as e:
             self._print_error(f"板卡ID操作失败: {e}")
@@ -665,7 +667,7 @@ class CommandLineInterface:
                 return 1
                 
         except KeyboardInterrupt:
-            print(f"\\n{Fore.YELLOW}操作被用户中断{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}操作被用户中断{Style.RESET_ALL}")
             return 1
         except Exception as e:
             self._print_error(f"程序异常: {e}")

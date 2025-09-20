@@ -333,7 +333,7 @@ class INA226:
                     'bus_voltage': bus_voltage,
                     'current': current,
                     'power': power,
-                    'load_voltage': bus_voltage + shunt_voltage
+                    'load_voltage': bus_voltage + shunt_voltage # type: ignore
                 }
             else:
                 return None
@@ -342,12 +342,12 @@ class INA226:
             logger.error(f"读取所有数据异常: {e}")
             return None
     
-    def initialize(self, max_current: float = 3.2) -> bool:
+    def initialize(self, max_current: float = 0.8192) -> bool:
         """
         初始化INA226（完整初始化流程）
         
         Args:
-            max_current: 最大预期电流（安培），默认3.2A
+            max_current: 最大预期电流（安培），默认0.8192A
             
         Returns:
             bool: 成功返回True
@@ -460,7 +460,7 @@ if __name__ == "__main__":
                     print(f"  {key}: {value}")
                 
                 # 连续测量
-                print("\\n开始连续测量（按Ctrl+C停止）:")
+                print("\n开始连续测量（按Ctrl+C停止）：")
                 try:
                     while True:
                         data = ina226.read_all()
@@ -470,7 +470,7 @@ if __name__ == "__main__":
                                   f"功率: {data['power']:.3f}W")
                         time.sleep(1)
                 except KeyboardInterrupt:
-                    print("\\n测量结束")
+                    print("\n测量结束")
             else:
                 print("INA226初始化失败")
                 

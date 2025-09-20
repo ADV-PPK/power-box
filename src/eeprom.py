@@ -7,7 +7,7 @@ EEPROM访问模块
 
 import time
 import logging
-from typing import Optional, List, Union
+from typing import Optional, List, Union, cast
 
 # 导入CH341模块
 try:
@@ -85,12 +85,14 @@ class EEPROM:
         
         return True
     
-    def _wait_write_complete(self, timeout: float = 0.01) -> bool:
+    def _wait_write_complete(self, timeout: float = 0.1, probe_addr: Optional[int] = None, expected: Optional[int] = None) -> bool:
         """
         等待写操作完成
         
         Args:
             timeout: 超时时间（秒）
+            probe_addr: 可选，轮询读取的地址（用于无ACK轮询时回退）
+            expected: 可选，预期写入的字节（用于回读比较）
             
         Returns:
             bool: 成功返回True
@@ -98,9 +100,29 @@ class EEPROM:
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            # 通过ACK轮询检查写操作是否完成
-            if self.ch341.i2c_write(self.address, []):
-                return True
+            # 优先：通过ACK轮询检查写操作是否完成
+            try:
+                if self.ch341.i2c_write(self.address, []):
+                    return True
+            except Exception:
+                pass
+
+            # 回退：通过对 probe_addr 执行最小读操作来判断是否就绪
+            if probe_addr is not None:
+                try:
+                    # 组装地址字节
+                    if self.address_bytes == 1:
+                        addr_data = [probe_addr & 0xFF]
+                    else:
+                        addr_data = [(probe_addr >> 8) & 0xFF, probe_addr & 0xFF]
+                    rb = self.ch341.i2c_write_read(self.address, addr_data, 1)
+                    if rb and len(rb) == 1:
+                        if expected is None:
+                            return True
+                        if rb[0] == (expected & 0xFF):
+                            return True
+                except Exception:
+                    pass
             time.sleep(0.001)  # 等待1ms
         
         logger.warning("写操作完成等待超时")
@@ -165,8 +187,8 @@ class EEPROM:
             
             # 写入数据
             if self.ch341.i2c_write(self.address, write_data):
-                # 等待写操作完成
-                return self._wait_write_complete()
+                # 等待写操作完成（使用读回退/期望值）
+                return self._wait_write_complete(probe_addr=address, expected=value)
             else:
                 logger.error(f"写入字节失败: 地址0x{address:04X}")
                 return False
@@ -229,6 +251,22 @@ class EEPROM:
         try:
             offset = 0
             total_length = len(data)
+            # 对于1字节地址的器件（如24C02系列），使用单字节写+轮询校验以提升可靠性
+            if self.address_bytes == 1:
+                buf: bytes = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+                for i in range(total_length):
+                    cur_addr = address + i
+                    byte_val: int = buf[i] & 0xFF
+                    if not self.ch341.i2c_write_register(self.address, cur_addr & 0xFF, byte_val):
+                        logger.error(f"字节写入失败: 地址0x{cur_addr:04X}")
+                        return False
+                    if not self._wait_write_complete(probe_addr=cur_addr, expected=byte_val):
+                        logger.error(f"字节写入完成等待超时: 地址0x{cur_addr:04X}")
+                        return False
+                    # 适度延时，增加兼容性
+                    time.sleep(0.001)
+                logger.info(f"成功写入{total_length}字节: 地址0x{address:04X}")
+                return True
             
             while offset < total_length:
                 # 计算当前页的起始地址
@@ -254,10 +292,14 @@ class EEPROM:
                     logger.error(f"页写入失败: 地址0x{current_addr:04X}")
                     return False
                 
-                # 等待写操作完成
-                if not self._wait_write_complete():
+                # 等待写操作完成（使用读回退/期望值：最后一个字节）
+                probe_addr = current_addr + write_length - 1
+                expected = cast(int, data[offset + write_length - 1])
+                if not self._wait_write_complete(probe_addr=probe_addr, expected=expected):
                     logger.error(f"页写入完成等待超时: 地址0x{current_addr:04X}")
                     return False
+                # 额外固定延时，增加兼容性
+                time.sleep(0.005)
                 
                 offset += write_length
                 logger.debug(f"页写入成功: 地址0x{current_addr:04X}, 长度{write_length}")
@@ -283,11 +325,15 @@ class EEPROM:
         try:
             data = self.read_bytes(address, max_length)
             if data:
+                # 诊断：记录前16字节
+                logger.debug("读取字符串原始数据(前16字节): " + ' '.join(f"{b:02X}" for b in data[:16]))
+                # 若全为0xFF或0x00，视为未设置
+                if all(b == 0xFF for b in data) or all(b == 0x00 for b in data):
+                    return ""
                 # 查找NULL终止符
                 null_pos = data.find(0)
                 if null_pos >= 0:
                     data = data[:null_pos]
-                
                 # 转换为字符串
                 return data.decode('utf-8', errors='ignore')
             else:
@@ -310,8 +356,21 @@ class EEPROM:
         """
         try:
             # 转换为字节并添加NULL终止符
-            data = text.encode('utf-8') + b'\\0'
-            return self.write_bytes(address, data)
+            data = text.encode('utf-8') + b'\x00'
+            if not self.write_bytes(address, data):
+                return False
+            # 额外固定延时，确保写周期完全结束
+            time.sleep(0.005)
+            # 写入后回读校验
+            verify = self.read_bytes(address, len(data))
+            if verify is None:
+                logger.error("写入后读取校验失败: 读取为空")
+                return False
+            if bytes(verify) != data:
+                logger.error("写入校验不一致，可能写保护(WP)已使能或地址不正确")
+                logger.debug(f"期望: {data.hex(' ')} 实际: {bytes(verify).hex(' ')}")
+                return False
+            return True
             
         except Exception as e:
             logger.error(f"写入字符串异常: {e}")
@@ -344,7 +403,7 @@ class EEPROM:
         logger.info(f"写入板卡识别码: {board_id}")
         return self.write_string(address, board_id)
     
-    def dump_hex(self, start_addr: int = 0, length: int = None) -> str:
+    def dump_hex(self, start_addr: int = 0, length: Optional[int] = None) -> str:
         """
         以十六进制格式转储EEPROM内容
         
@@ -389,8 +448,8 @@ class EEPROM:
             
             line += hex_part + " |" + ascii_part + "|"
             result.append(line)
-        
-        return "\\n".join(result)
+
+        return "\n".join(result)
     
     def test_device(self, silent: bool = False) -> bool:
         """
@@ -545,13 +604,13 @@ if __name__ == "__main__":
             print("开始测试EEPROM...")
             
             # 扫描EEPROM设备
-            devices = scan_eeprom_devices(ch341)
+            devices = scan_eeprom_devices(ch341, method='read_probe')
             if not devices:
                 print("未发现EEPROM设备")
                 exit(1)
             
             # 使用第一个发现的设备
-            eeprom = EEPROM(ch341, devices[0], '24C32')
+            eeprom = EEPROM(ch341, devices[0], '24C02')
             
             # 显示设备信息
             info = eeprom.get_info()
@@ -559,17 +618,27 @@ if __name__ == "__main__":
             for key, value in info.items():
                 print(f"  {key}: {value}")
             
-            # 读取板卡ID
-            board_id = eeprom.read_board_id()
-            if board_id:
-                print(f"\\n当前板卡ID: {board_id}")
-            else:
-                print("\\n未找到板卡ID")
-            
             # 转储前64字节内容
-            print("\\nEEPROM内容 (前64字节):")
+            print("\nEEPROM内容 (前64字节):")
             hex_dump = eeprom.dump_hex(0, 64)
             print(hex_dump)
+            
+            # 设置板卡ID
+            new_id = "Power Box S0"
+            print("\n写入板卡ID:", new_id)
+            if eeprom.write_board_id(new_id):
+                print("写入成功")
+            else:
+                print("写入失败")
+            
+            # 读取板卡ID
+            print("\n读取板卡ID:")
+            board_id = eeprom.read_board_id()
+            if board_id:
+                print(f"\n当前板卡ID: {board_id}")
+            else:
+                print("\n未找到板卡ID")
+            
             
     except Exception as e:
         print(f"测试异常: {e}")
