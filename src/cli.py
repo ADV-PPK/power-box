@@ -52,6 +52,9 @@ class CommandLineInterface:
   %(prog)s monitor -s 1000 -f data.json # 监测1000次，保存到文件
   %(prog)s board-id                      # 读取板卡ID
   %(prog)s board-id -w "PWR-BOX-001"     # 写入板卡ID
+  %(prog)s power on                      # 打开电源
+  %(prog)s power off                     # 关闭电源
+  %(prog)s power status                  # 查看电源状态
             '''
         )
         
@@ -80,8 +83,6 @@ class CommandLineInterface:
                                default='all', help='扫描设备类型')
         scan_parser.add_argument('--eeprom-method', choices=['read_probe', 'write_test', 'class_test'],
                                default='write_test', help='EEPROM扫描方法 (默认: read_probe)')
-        scan_parser.add_argument('--verbose-scan', action='store_true',
-                               help='详细扫描输出模式')
         
         # info命令
         info_parser = subparsers.add_parser('info', help='显示设备信息')
@@ -135,6 +136,20 @@ class CommandLineInterface:
                                help='起始地址 (默认: 0x00)')
         dump_parser.add_argument('--length', type=int,
                                help='转储长度 (默认: 全部)')
+        
+        # power命令
+        power_parser = subparsers.add_parser('power', help='电源控制')
+        power_parser.add_argument('--pin', type=str, default='GPIO1', help='用于电源控制的GPIO引脚，示例: GPIO1 或 1 (默认: GPIO1)')
+        power_subparsers = power_parser.add_subparsers(dest='power_action')
+        
+        # power on
+        on_parser = power_subparsers.add_parser('on', help='打开电源')
+        
+        # power off
+        off_parser = power_subparsers.add_parser('off', help='关闭电源')
+        
+        # power status
+        status_parser = power_subparsers.add_parser('status', help='查看电源状态')
     
     def _parse_address(self, addr_str: str) -> int:
         """解析地址字符串（支持十六进制）"""
@@ -553,6 +568,69 @@ class CommandLineInterface:
         finally:
             self._cleanup_devices()
     
+    def cmd_power(self, args) -> int:
+        """电源控制命令"""
+        if not self._init_devices(args):
+            return 1
+        
+        try:
+            # 解析并规范化引脚名称
+            pin_arg = getattr(args, 'pin', 'GPIO1')
+            pin = f"GPIO{pin_arg}" if isinstance(pin_arg, str) and pin_arg.isdigit() else (pin_arg if str(pin_arg).upper().startswith('GPIO') else f"GPIO{pin_arg}")
+
+            # 校验引脚是否受支持
+            try:
+                gpios = getattr(self.ch341, 'supported_gpios', None)
+                if isinstance(gpios, list):
+                    if pin not in gpios:
+                        self._print_error(f"不支持的GPIO引脚: {pin}. 可用: {', '.join(gpios)}")
+                        return 1
+            except Exception:
+                pass
+
+            if args.power_action == 'on':
+                # 通过选定GPIO打开电源 (高电平)
+                try:
+                    if hasattr(self.ch341, 'init_gpio'):
+                        self.ch341.init_gpio(pin, 'out')
+                except Exception:
+                    pass
+                self.ch341.set_gpio(pin, True)
+                self._print_success("电源已打开")
+                return 0
+            
+            elif args.power_action == 'off':
+                # 通过选定GPIO关闭电源 (低电平)
+                try:
+                    if hasattr(self.ch341, 'init_gpio'):
+                        self.ch341.init_gpio(pin, 'out')
+                except Exception:
+                    pass
+                self.ch341.set_gpio(pin, False)
+                self._print_success("电源已关闭")
+                return 0
+            
+            elif args.power_action == 'status':
+                # 读取选定GPIO状态
+                try:
+                    status = self.ch341.get_gpio(pin)
+                    state_str = "开启" if status else "关闭"
+                    print(f"电源状态: {state_str}")
+                    return 0
+                except Exception as e:
+                    self._print_error(f"读取电源状态失败: {e}")
+                    return 1
+            
+            else:
+                self._print_error("未知的电源操作")
+                return 1
+                
+        except Exception as e:
+            self._print_error(f"电源控制失败: {e}")
+            return 1
+        finally:
+            self._cleanup_devices()
+    
     def run(self, argv=None) -> int:
         """运行命令行接口"""
         try:
@@ -577,6 +655,7 @@ class CommandLineInterface:
                 'monitor': self.cmd_monitor,
                 'board-id': self.cmd_board_id,
                 'eeprom': self.cmd_eeprom,
+                'power': self.cmd_power,
             }
             
             if args.command in command_map:

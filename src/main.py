@@ -6,7 +6,7 @@
 - CH341 USB转I2C通信
 - INA226电流/电压测量
 - EEPROM访问板卡唯一识别码
-- 继电器控制被测电源
+- GPIO控制被测电源开关
 - 完整的命令行接口
 
 使用示例：
@@ -15,6 +15,9 @@
     python main.py measure                   # 单次测量
     python main.py monitor -t 10             # 监测10秒
     python main.py board-id                  # 读取板卡ID
+    python main.py power on                  # 打开电源
+    python main.py power off                 # 关闭电源
+    python main.py power status              # 查看电源状态
 """
 
 import sys

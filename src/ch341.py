@@ -9,6 +9,7 @@ import ctypes
 import os
 import platform
 import logging
+import time
 from typing import Optional, List, Union
 from ctypes import wintypes, Structure, Union, POINTER, byref, c_uint8, c_uint16, c_uint32, c_ulong, c_char_p, c_void_p
 
@@ -273,6 +274,25 @@ class CH341Device:
             return status.value
         return None
 
+    def _set_output(self, enable_mask: int, direction_mask: int, data_mask: int, device_index: Optional[int] = None) -> bool:
+        """
+        设置输出/方向寄存器封装，参数语义与 ch341_device.py 对齐
+
+        Args:
+            enable_mask: 使能掩码（bit0/bit1: b8-b15(data/dir) bit2/bit3: b0-b7(data/dir) bit4: b16-b23(data only)）
+            direction_mask: 方向掩码（1=输出 0=输入）
+            data_mask: 数据掩码（1=高 0=低）
+            device_index: 设备序号
+
+        Returns:
+            bool: 设置成功
+        """
+        if device_index is None:
+            device_index = self.device_index
+        if not self._dll:
+            return False
+        return bool(self._dll.CH341SetOutput(device_index, enable_mask, direction_mask, data_mask))
+
     def get_status(self, device_index: Optional[int] = None) -> Optional[dict]:
         """
         获取设备状态
@@ -535,6 +555,131 @@ class CH341Device:
         except Exception as e:
             raise CH341Exception(f"I2C批量写入错误: {e}")
     
+    @property
+    def supported_gpios(self) -> List[str]:
+        """获取支持的GPIO口列表"""
+        return list(self._supported_gpios.keys())
+
+    def init_gpio(self, gpio_name: str, direction: str, mode: Optional[str] = None, pull: Optional[str] = None) -> bool:
+        """
+        初始化GPIO方向，接口与 ch341_device.py 对齐
+
+        Args:
+            gpio_name: GPIO名称（如 'GPIO0'）
+            direction: 'in' 或 'out'
+            mode: 推挽/开漏（CH341不支持，忽略，仅兼容）
+            pull: 上拉/下拉（CH341不支持，忽略，仅兼容）
+        """
+        if gpio_name not in self._supported_gpios:
+            logger.error(f"不支持的GPIO口: {gpio_name}")
+            return False
+        if direction not in ['in', 'out']:
+            logger.error(f"无效的方向: {direction}")
+            return False
+
+        if mode is not None:
+            logger.warning("CH341的GPIO不支持推挽/开漏切换，忽略mode参数")
+        if pull is not None:
+            logger.warning("CH341的GPIO不支持上拉/下拉切换，忽略pull参数")
+
+        gpio_index = self._supported_gpios[gpio_name]
+        try:
+            if gpio_index > 15:
+                logger.error(f"不支持修改 {gpio_name} 的方向")
+                return False
+            elif gpio_index > 7:
+                enable_mask = 0x2
+            else:
+                enable_mask = 0x8
+
+            direction_mask = self.gpio_dir_mask
+            if direction == 'out':
+                direction_mask |= (0x1 << gpio_index)
+            else:  # 'in'
+                direction_mask &= ~(0x1 << gpio_index)
+
+            if direction_mask == self.gpio_dir_mask:
+                return True
+
+            if not self._set_output(enable_mask, direction_mask, 0x0):
+                logger.error("设置GPIO方向失败")
+                return False
+
+            self.gpio_dir_mask = direction_mask
+            return True
+        except Exception as e:
+            logger.error(f"初始化GPIO失败: {e}")
+            return False
+
+    def set_gpio_output(self, gpio_name: str, value: bool) -> bool:
+        """
+        设置GPIO输出电平，接口与 ch341_device.py 对齐
+        """
+        if gpio_name not in self._supported_gpios:
+            logger.error(f"不支持的GPIO口: {gpio_name}")
+            return False
+        gpio_index = self._supported_gpios[gpio_name]
+
+        if (self.gpio_dir_mask & (0x1 << gpio_index)) == 0:
+            logger.warning(f"GPIO口 {gpio_name} 未初始化为输出模式")
+            # 尝试自动初始化为输出
+            if not self.init_gpio(gpio_name, 'out'):
+                logger.error(f"自动初始化 {gpio_name} 为输出失败")
+                # 继续尝试设置，但可能失败
+
+        try:
+            if gpio_index > 23:
+                logger.error(f"未定义的GPIO口: {gpio_name}")
+                return False
+            elif gpio_index > 15:
+                enable_mask = 0x10
+            elif gpio_index > 7:
+                enable_mask = 0x1
+            else:
+                enable_mask = 0x4
+
+            data_mask = self._get_input()
+            if data_mask is None:
+                data_mask = self.gpio_data_mask
+
+            if value:
+                data_mask |= (0x1 << gpio_index)
+            else:
+                data_mask &= ~(0x1 << gpio_index)
+
+            if self._set_output(enable_mask, 0x0, data_mask):
+                # 等待更长时间以确保硬件状态稳定（与 ch341_device.py 保持一致）
+                time.sleep(0.5)
+                confirm = self._get_input()
+                if confirm is None or confirm != data_mask:
+                    logger.warning(f"GPIO口 {gpio_name} 设置后读取不一致")
+                else:
+                    self.gpio_data_mask = data_mask
+                return True
+            logger.error(f"GPIO口 {gpio_name} 设置失败")
+            return False
+        except Exception as e:
+            logger.error(f"设置GPIO口 {gpio_name} 输出值失败: {e}")
+            return False
+
+    def get_gpio_input(self, gpio_name: str) -> Optional[bool]:
+        """
+        获取GPIO输入电平，接口与 ch341_device.py 对齐
+        """
+        if gpio_name not in self._supported_gpios:
+            logger.error(f"不支持的GPIO口: {gpio_name}")
+            return None
+        gpio_index = self._supported_gpios[gpio_name]
+
+        try:
+            input_value = self._get_input()
+            if input_value is None:
+                return None
+            return (input_value & (0x1 << gpio_index)) != 0
+        except Exception as e:
+            logger.error(f"读取GPIO输入值失败: {e}")
+            return None
+
     def set_gpio(self, pin: str, value: bool) -> bool:
         """
         设置GPIO输出
@@ -548,29 +693,13 @@ class CH341Device:
         """
         if not self.is_opened or not self._dll:
             raise CH341Exception("设备未打开或DLL未加载")
-        
         if pin not in self._supported_gpios:
             raise CH341Exception(f"不支持的GPIO引脚: {pin}")
-        
         try:
-            pin_bit = self._supported_gpios[pin]
-            
-            if value:
-                self.gpio_data_mask |= (1 << pin_bit)
-            else:
-                self.gpio_data_mask &= ~(1 << pin_bit)
-            
-            success = self._dll.CH341SetOutput(
-                self.device_index,
-                self.gpio_dir_mask,   # 方向掩码
-                self.gpio_data_mask,  # 数据掩码
-                0x00000000            # 附加参数
-            )
-            
-            if not success:
+            ok = self.set_gpio_output(pin, value)
+            if not ok:
                 raise CH341Exception(f"设置GPIO失败: {pin}={value}")
             return True
-            
         except Exception as e:
             raise CH341Exception(f"GPIO操作错误: {e}")
     
@@ -586,18 +715,13 @@ class CH341Device:
         """
         if not self.is_opened or not self._dll:
             raise CH341Exception("设备未打开或DLL未加载")
-        
         if pin not in self._supported_gpios:
             raise CH341Exception(f"不支持的GPIO引脚: {pin}")
-        
         try:
-            status = c_uint32()
-            if self._dll.CH341GetInput(self.device_index, byref(status)):
-                pin_bit = self._supported_gpios[pin]
-                return bool(status.value & (1 << pin_bit))
-            else:
+            val = self.get_gpio_input(pin)
+            if val is None:
                 raise CH341Exception(f"读取GPIO失败: {pin}")
-                
+            return bool(val)
         except Exception as e:
             raise CH341Exception(f"GPIO读取错误: {e}")
     
@@ -689,6 +813,28 @@ class CH341Device:
             return read_data if read_data else None
         except:
             return None
+    
+    def i2c_write(self, device_addr: int, data: List[int]) -> bool:
+        """
+        I2C写入方法，兼容性方法
+        
+        Args:
+            device_addr: 设备地址
+            data: 要写入的数据列表，第一个字节是寄存器地址，后续是数据
+            
+        Returns:
+            bool: 成功返回True，失败返回False
+        """
+        if not data:
+            return False
+        
+        try:
+            register_addr = data[0]
+            write_data = data[1:] if len(data) > 1 else []
+            return self.i2c_write_bytes(device_addr, register_addr, write_data)
+        except Exception as e:
+            logger.error(f"I2C写入失败: {e}")
+            return False
     
     def write(self, address: int, register: int, data: List[int]) -> bool:
         """
