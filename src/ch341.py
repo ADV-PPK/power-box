@@ -887,6 +887,18 @@ class CH341Device:
         except Exception as e:
             logger.error(f"多字节读取失败: {e}")
             return None
+        
+    def flush(self) -> bool:
+        """
+        刷新设备缓冲区
+        
+        Returns:
+            bool: 成功返回True，失败返回False
+        """
+        if not self.is_opened or not self._dll:
+            return False
+        self.reg_pointer = None
+        return True
 
 
 def get_device_count() -> int:

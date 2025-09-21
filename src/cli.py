@@ -393,10 +393,10 @@ class CommandLineInterface:
             else:  # table
                 print(f"{Fore.BLUE}=== 测量结果 ==={Style.RESET_ALL}")
                 print(f"分流电压: {data['shunt_voltage']:.6f} V")
-                print(f"总线电压: {data['bus_voltage']:.3f} V")
-                print(f"负载电压: {data['load_voltage']:.3f} V")
-                print(f"电流:     {data['current']:.3f} A")
-                print(f"功率:     {data['power']:.3f} W")
+                print(f"总线电压: {data['bus_voltage']:8.3f} V")
+                print(f"负载电压: {data['load_voltage']:8.3f} V")
+                print(f"电流:     {data['current']:.6f} A")
+                print(f"功率:     {data['power']:.6f} W")
             
             return 0
             

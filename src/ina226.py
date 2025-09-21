@@ -85,7 +85,7 @@ class INA226:
     CONFIG_MODE_SHUNT_BUS_CONT = 0x0007
     
     # 默认配置
-    DEFAULT_CONFIG = (CONFIG_AVG_16 | CONFIG_VBUSCT_1100US | 
+    DEFAULT_CONFIG = 0x4000 | (CONFIG_AVG_16 | CONFIG_VBUSCT_1100US | 
                      CONFIG_VSHCT_1100US | CONFIG_MODE_SHUNT_BUS_CONT)
     
     # 制造商ID和器件ID
@@ -122,8 +122,8 @@ class INA226:
         """
         try:
             # INA226使用大端字节序
-            data = [reg, (value >> 8) & 0xFF, value & 0xFF]
-            return self.ch341.i2c_write(self.address, data)
+            data = [(value >> 8) & 0xFF, value & 0xFF]
+            return self.ch341.write(self.address, reg, data)
         except Exception as e:
             logger.error(f"写寄存器异常: {e}")
             return False
@@ -140,7 +140,8 @@ class INA226:
         """
         try:
             # 写寄存器地址
-            data = self.ch341.i2c_write_read(self.address, [reg], 2)
+            data = self.ch341.read(self.address, reg, 2, fast_read=True)
+            logger.debug(f"读寄存器0x{reg:02X}数据: {data}")
             if data and len(data) == 2:
                 # 大端字节序转换
                 value = (data[0] << 8) | data[1]
@@ -289,6 +290,7 @@ class INA226:
             return None
             
         raw_value = self._read_register(self.REG_CURRENT)
+        logger.debug(f"读取电流原始值: {raw_value}")
         if raw_value is not None:
             # 转换为有符号16位数
             if raw_value > 32767:
@@ -352,6 +354,9 @@ class INA226:
         Returns:
             bool: 成功返回True
         """
+        # 清空I2C缓冲区
+        self.ch341.flush()
+
         logger.info("开始初始化INA226...")
         
         # 1. 检查设备
@@ -449,6 +454,9 @@ if __name__ == "__main__":
             # 使用第一个发现的设备
             ina226 = INA226(ch341, devices[0], shunt_resistance=0.1)
             
+            ch341.init_gpio('GPIO1', 'out')
+            ch341.set_gpio('GPIO1', True)  # 使能电源
+            
             # 初始化
             if ina226.initialize(max_current=3.2):
                 print("INA226初始化成功")
@@ -466,8 +474,8 @@ if __name__ == "__main__":
                         data = ina226.read_all()
                         if data:
                             print(f"总线电压: {data['bus_voltage']:.3f}V, "
-                                  f"电流: {data['current']:.3f}A, "
-                                  f"功率: {data['power']:.3f}W")
+                                  f"电流: {data['current']*1000:.3f}mA, "
+                                  f"功率: {data['power']*1000:.3f}mW")
                         time.sleep(1)
                 except KeyboardInterrupt:
                     print("\n测量结束")
