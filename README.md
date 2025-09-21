@@ -6,7 +6,7 @@
 
 - **电流/电压测量**: 使用 INA226 高精度电流传感器进行测量
 - **EEPROM 访问**: 读取/写入板卡唯一识别码
-- **继电器控制**: 控制被测电源的开关
+- **电源控制/GPIO**: 通过GPIO控制被测电源的开关，提供丰富的GPIO操作
 - **命令行接口**: 提供完整的命令行操作界面
 - **数据记录**: 支持连续监测和数据保存
 
@@ -86,19 +86,51 @@ python src/main.py eeprom read 0x10 16
 python src/main.py eeprom write 0x20 "Hello World"
 ```
 
-### 继电器控制
+### 电源控制（通过GPIO）
 ```bash
-# 打开继电器
-python src/main.py relay on
+# 打开/关闭电源（默认GPIO1）
+python src/main.py power on
+python src/main.py power off
 
-# 关闭继电器
-python src/main.py relay off
+# 指定用于控制电源的GPIO引脚
+python src/main.py power --pin GPIO1 on
+python src/main.py power --pin 1 off
 
-# 脉冲控制(2秒)
-python src/main.py relay pulse -d 2.0
+# 查看电源状态
+python src/main.py power status
+```
 
-# 查看状态
-python src/main.py relay status
+### GPIO 命令
+```bash
+# 列出支持的GPIO
+python src/main.py gpio list
+
+# 读取/设置电平
+python src/main.py gpio get --pin GPIO1
+python src/main.py gpio set --pin GPIO1 --value 1 --direction out
+
+# 翻转电平
+python src/main.py gpio toggle --pin GPIO1
+
+# 设置方向
+python src/main.py gpio dir set --pin GPIO1 --value out
+
+# 监视电平变化
+python src/main.py gpio watch --pin GPIO1 -i 0.5 --changes-only
+```
+
+### 交互式模式
+```bash
+# 进入交互式命令行，可连续执行命令
+python src/main.py -I
+
+# 在提示符下直接输入子命令
+scan
+info
+power on
+gpio list
+gpio set --pin GPIO1 --value 1
+gpio watch --pin GPIO1 -i 0.2 --changes-only
 ```
 
 ### 高级选项
@@ -145,10 +177,9 @@ pyinstaller --onefile --console src/main.py -n power-box
 - 默认型号: 24C32
 - 板卡ID存储地址: 0x00
 
-### 继电器配置
-- 默认控制模式: GPIO直接控制
-- 默认继电器ID: 0
-- 支持PCF8574 I2C扩展
+### GPIO/电源配置
+- 默认用于电源控制的GPIO: GPIO1（可通过 `--pin` 指定）
+- 支持的GPIO列表视硬件型号而定，使用 `gpio list` 查看
 
 ## 故障排除
 

@@ -88,16 +88,57 @@ power-box.exe board-id
 power-box.exe board-id -w "PWR-BOX-001"
 ```
 
-### 继电器控制
+### 电源控制（通过GPIO）
 ```cmd
-# 打开继电器（导通电源）
-power-box.exe relay on
+# 使用默认引脚(GPIO1)打开电源
+power-box.exe power on
 
-# 关闭继电器（断开电源）
-power-box.exe relay off
+# 关闭电源
+power-box.exe power off
 
-# 脉冲控制（开启2秒后关闭）
-power-box.exe relay pulse -d 2.0
+# 指定用于控制电源的GPIO引脚
+power-box.exe power --pin GPIO1 on
+power-box.exe power --pin 1 off
+
+# 查看当前电源状态
+power-box.exe power status
+```
+
+### GPIO 控制
+```cmd
+# 列出支持的GPIO
+power-box.exe gpio list
+
+# 读取GPIO电平
+power-box.exe gpio get --pin GPIO1
+
+# 设置GPIO电平（并可指定方向）
+power-box.exe gpio set --pin GPIO1 --value 1 --direction out
+power-box.exe gpio set --pin 1 --value low
+
+# 翻转GPIO电平
+power-box.exe gpio toggle --pin GPIO1
+
+# 设置GPIO方向
+power-box.exe gpio dir set --pin GPIO1 --value out
+
+# 监视GPIO电平变化
+power-box.exe gpio watch --pin GPIO1 -i 0.5 --changes-only
+power-box.exe gpio watch --pin 1 -n 20
+```
+
+### 交互式模式
+```cmd
+# 进入交互式命令行
+power-box.exe -I
+
+# 交互模式中可直接输入子命令，例如：
+scan
+info
+power on
+gpio list
+gpio set --pin GPIO1 --value 1
+gpio watch --pin GPIO1 -i 0.2 --changes-only
 ```
 
 ## 常见问题
@@ -123,12 +164,12 @@ power-box.exe relay pulse -d 2.0
 3. 确认EEPROM供电正常
 4. 尝试不同的EEPROM型号参数
 
-### Q: 继电器不工作
+### Q: 电源/GPIO 控制不工作
 **解决方案:**
 1. 检查继电器供电
-2. 确认继电器驱动电路
-3. 测试GPIO输出电平
-4. 检查继电器线圈电阻
+2. 确认继电器驱动电路或被控电路连接正确
+3. 使用 `gpio list/get/set` 测试GPIO状态
+4. 使用 `power status` 查看电源控制GPIO电平
 
 ## 高级配置
 
@@ -203,7 +244,7 @@ for /f "tokens=*" %%i in ('power-box.exe board-id') do set BOARD_ID=%%i
 echo 板卡ID: %BOARD_ID%
 
 rem 打开电源
-power-box.exe relay on
+power-box.exe power on
 echo 电源已打开
 
 rem 等待稳定
@@ -214,7 +255,7 @@ power-box.exe monitor -t 10 -f test_data.json
 echo 测量完成
 
 rem 关闭电源
-power-box.exe relay off
+power-box.exe power off
 echo 电源已关闭
 
 echo 测试结束

@@ -11,7 +11,7 @@ current_file_path = os.path.abspath(__file__)
 current_file_dir = os.path.dirname(current_file_path)
 
 sys.path.append(current_file_dir)
-from i2c_adapter import I2CDevice
+from src.i2c_tools.i2c_adapter import I2CDevice
 
 
 """

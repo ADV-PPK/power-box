@@ -13,6 +13,7 @@ import sys
 import time
 import json
 import logging
+import shlex
 from typing import Optional, Dict, Any
 from colorama import init, Fore, Style
 
@@ -35,6 +36,7 @@ class CommandLineInterface:
         self.ch341 = None
         self.ina226 = None
         self.eeprom = None
+        self._interactive_active = False
         
         self._setup_parser()
     
@@ -57,99 +59,109 @@ class CommandLineInterface:
   %(prog)s power status                  # 查看电源状态
             '''
         )
-        
+
         # 全局选项
-        self.parser.add_argument('-v', '--verbose', action='store_true',
-                               help='详细输出模式')
-        self.parser.add_argument('--device-index', type=int, default=0,
-                               help='CH341设备索引 (默认: 0)')
-        self.parser.add_argument('--ina226-addr', type=str, default='0x40',
-                               help='INA226 I2C地址 (默认: 0x40)')
-        self.parser.add_argument('--eeprom-addr', type=str, default='0x50',
-                               help='EEPROM I2C地址 (默认: 0x50)')
-        self.parser.add_argument('--eeprom-type', type=str, default='24C02',
-                               help='EEPROM型号 (默认: 24C02)')
-        self.parser.add_argument('--shunt-resistance', type=float, default=10,
-                               help='分流电阻阻值/欧姆 (默认: 10)')
-        self.parser.add_argument('--max-current', type=float, default=0.8192,
-                               help='最大预期电流/安培 (默认: 0.8192)')
-        
+        self.parser.add_argument('-v', '--verbose', action='store_true', help='详细输出模式')
+        self.parser.add_argument('--device-index', type=int, default=0, help='CH341设备索引 (默认: 0)')
+        self.parser.add_argument('--ina226-addr', type=str, default='0x40', help='INA226 I2C地址 (默认: 0x40)')
+        self.parser.add_argument('--eeprom-addr', type=str, default='0x50', help='EEPROM I2C地址 (默认: 0x50)')
+        self.parser.add_argument('--eeprom-type', type=str, default='24C02', help='EEPROM型号 (默认: 24C02)')
+        self.parser.add_argument('--shunt-resistance', type=float, default=10, help='分流电阻阻值/欧姆 (默认: 10)')
+        self.parser.add_argument('--max-current', type=float, default=0.8192, help='最大预期电流/安培 (默认: 0.8192)')
+        self.parser.add_argument('-I', '--interactive', action='store_true', help='交互式模式：进入交互式命令行，可连续执行命令')
+
         # 子命令
         subparsers = self.parser.add_subparsers(dest='command', help='可用命令')
-        
+
         # scan命令
         scan_parser = subparsers.add_parser('scan', help='扫描设备')
-        scan_parser.add_argument('--type', choices=['all', 'ch341', 'ina226', 'eeprom'],
-                               default='all', help='扫描设备类型')
-        scan_parser.add_argument('--eeprom-method', choices=['read_probe', 'write_test', 'class_test'],
-                               default='write_test', help='EEPROM扫描方法 (默认: read_probe)')
-        
+        scan_parser.add_argument('--type', choices=['all', 'ch341', 'ina226', 'eeprom'], default='all', help='扫描设备类型')
+        scan_parser.add_argument('--eeprom-method', choices=['read_probe', 'write_test', 'class_test'], default='write_test', help='EEPROM扫描方法 (默认: read_probe)')
+
         # info命令
-        info_parser = subparsers.add_parser('info', help='显示设备信息')
-        
+        subparsers.add_parser('info', help='显示设备信息')
+
         # measure命令
         measure_parser = subparsers.add_parser('measure', help='单次测量')
-        measure_parser.add_argument('--format', choices=['table', 'json', 'csv'],
-                                  default='table', help='输出格式')
-        
+        measure_parser.add_argument('--format', choices=['table', 'json', 'csv'], default='table', help='输出格式')
+
         # monitor命令
         monitor_parser = subparsers.add_parser('monitor', help='连续监测')
-        monitor_parser.add_argument('-t', '--time', type=float,
-                                  help='监测时间/秒')
-        monitor_parser.add_argument('-s', '--samples', type=int,
-                                  help='监测次数')
-        monitor_parser.add_argument('-i', '--interval', type=float, default=1.0,
-                                  help='监测间隔/秒 (默认: 1.0)')
-        monitor_parser.add_argument('-f', '--file', type=str,
-                                  help='保存数据到文件')
-        monitor_parser.add_argument('--format', choices=['table', 'json', 'csv'],
-                                  default='table', help='输出格式')
-        
+        monitor_parser.add_argument('-t', '--time', type=float, help='监测时间/秒')
+        monitor_parser.add_argument('-s', '--samples', type=int, help='监测次数')
+        monitor_parser.add_argument('-i', '--interval', type=float, default=1.0, help='监测间隔/秒 (默认: 1.0)')
+        monitor_parser.add_argument('-f', '--file', type=str, help='保存数据到文件')
+        monitor_parser.add_argument('--format', choices=['table', 'json', 'csv'], default='table', help='输出格式')
+
         # board-id命令
         board_id_parser = subparsers.add_parser('board-id', help='板卡ID操作')
-        board_id_parser.add_argument('-w', '--write', type=str,
-                                   help='写入板卡ID')
-        board_id_parser.add_argument('-a', '--address', type=str, default='0x00',
-                                   help='EEPROM存储地址 (默认: 0x00)')
-        
+        board_id_parser.add_argument('-w', '--write', type=str, help='写入板卡ID')
+        board_id_parser.add_argument('-a', '--address', type=str, default='0x00', help='EEPROM存储地址 (默认: 0x00)')
+
         # eeprom命令
         eeprom_parser = subparsers.add_parser('eeprom', help='EEPROM操作')
         eeprom_subparsers = eeprom_parser.add_subparsers(dest='eeprom_action')
-        
+
         # eeprom read
         read_parser = eeprom_subparsers.add_parser('read', help='读取EEPROM')
         read_parser.add_argument('address', type=str, help='起始地址 (十六进制)')
         read_parser.add_argument('length', type=int, help='读取长度')
-        read_parser.add_argument('--format', choices=['hex', 'ascii', 'raw'],
-                               default='hex', help='输出格式')
-        
+        read_parser.add_argument('--format', choices=['hex', 'ascii', 'raw'], default='hex', help='输出格式')
+
         # eeprom write
         write_parser = eeprom_subparsers.add_parser('write', help='写入EEPROM')
         write_parser.add_argument('address', type=str, help='起始地址 (十六进制)')
         write_parser.add_argument('data', type=str, help='要写入的数据')
-        write_parser.add_argument('--format', choices=['hex', 'ascii'],
-                                default='ascii', help='数据格式')
-        
+        write_parser.add_argument('--format', choices=['hex', 'ascii'], default='ascii', help='数据格式')
+
         # eeprom dump
         dump_parser = eeprom_subparsers.add_parser('dump', help='转储EEPROM')
-        dump_parser.add_argument('--start', type=str, default='0x00',
-                               help='起始地址 (默认: 0x00)')
-        dump_parser.add_argument('--length', type=int,
-                               help='转储长度 (默认: 全部)')
-        
+        dump_parser.add_argument('--start', type=str, default='0x00', help='起始地址 (默认: 0x00)')
+        dump_parser.add_argument('--length', type=int, help='转储长度 (默认: 全部)')
+
         # power命令
         power_parser = subparsers.add_parser('power', help='电源控制')
         power_parser.add_argument('--pin', type=str, default='GPIO1', help='用于电源控制的GPIO引脚，示例: GPIO1 或 1 (默认: GPIO1)')
         power_subparsers = power_parser.add_subparsers(dest='power_action')
-        
-        # power on
-        on_parser = power_subparsers.add_parser('on', help='打开电源')
-        
-        # power off
-        off_parser = power_subparsers.add_parser('off', help='关闭电源')
-        
-        # power status
-        status_parser = power_subparsers.add_parser('status', help='查看电源状态')
+        power_subparsers.add_parser('on', help='打开电源')
+        power_subparsers.add_parser('off', help='关闭电源')
+        power_subparsers.add_parser('status', help='查看电源状态')
+
+        # gpio命令
+        gpio_parser = subparsers.add_parser('gpio', help='GPIO控制与查询')
+        gpio_subparsers = gpio_parser.add_subparsers(dest='gpio_action')
+
+        # gpio list
+        gpio_subparsers.add_parser('list', help='列出支持的GPIO引脚')
+
+        # gpio get
+        gpio_get = gpio_subparsers.add_parser('get', help='读取GPIO电平')
+        gpio_get.add_argument('--pin', required=True, help='GPIO引脚，如 GPIO1 或 1')
+
+        # gpio set
+        gpio_set = gpio_subparsers.add_parser('set', help='设置GPIO电平')
+        gpio_set.add_argument('--pin', required=True, help='GPIO引脚，如 GPIO1 或 1')
+        gpio_set.add_argument('--value', required=True, choices=['0', '1', 'low', 'high', 'false', 'true'], help='目标电平')
+        gpio_set.add_argument('--direction', choices=['in', 'out'], default='out', help='方向（默认: out）')
+
+        # gpio toggle
+        gpio_toggle = gpio_subparsers.add_parser('toggle', help='翻转GPIO电平')
+        gpio_toggle.add_argument('--pin', required=True, help='GPIO引脚，如 GPIO1 或 1')
+
+        # gpio dir set
+        gpio_dir = gpio_subparsers.add_parser('dir', help='设置GPIO方向')
+        gpio_dir_sub = gpio_dir.add_subparsers(dest='dir_action')
+        gpio_dir_set = gpio_dir_sub.add_parser('set', help='设置方向')
+        gpio_dir_set.add_argument('--pin', required=True, help='GPIO引脚，如 GPIO1 或 1')
+        gpio_dir_set.add_argument('--value', required=True, choices=['in', 'out'], help='方向 in/out')
+
+        # gpio watch
+        gpio_watch = gpio_subparsers.add_parser('watch', help='持续监视GPIO电平变化')
+        gpio_watch.add_argument('--pin', required=True, help='GPIO引脚，如 GPIO1 或 1')
+        gpio_watch.add_argument('-i', '--interval', type=float, default=0.5, help='轮询间隔秒 (默认: 0.5)')
+        gpio_watch.add_argument('-t', '--time', type=float, help='持续时间秒')
+        gpio_watch.add_argument('-n', '--samples', type=int, help='采样次数')
+        gpio_watch.add_argument('--changes-only', action='store_true', help='仅在电平变化时输出')
     
     def _parse_address(self, addr_str: str) -> int:
         """解析地址字符串（支持十六进制）"""
@@ -173,19 +185,29 @@ class CommandLineInterface:
     def _print_warning(self, message: str):
         """打印警告"""
         print(f"{Fore.YELLOW}警告: {message}{Style.RESET_ALL}")
+
+    def _normalize_gpio_pin(self, pin: str) -> str:
+        """规范化GPIO引脚名称: '1' -> 'GPIO1', 'gpio2' -> 'GPIO2'"""
+        s = str(pin).strip()
+        if s.upper().startswith('GPIO'):
+            num = s[4:]
+            return f"GPIO{num}"
+        if s.isdigit():
+            return f"GPIO{s}"
+        return s
     
     def _init_devices(self, args) -> bool:
         """初始化设备"""
         try:
             import ch341
             import ina226
-            import eeprom 
+            import eeprom
         except ImportError:
-            # 如果直接导入失败，尝试相对导入
+            # 如果直接导入失败，尝试相对导入（当作为包导入时）
             try:
-                from . import ch341
-                from . import ina226
-                from . import eeprom
+                from . import ch341  # type: ignore
+                from . import ina226  # type: ignore
+                from . import eeprom  # type: ignore
             except ImportError:
                 # 最后尝试添加当前目录到路径
                 import sys
@@ -196,6 +218,19 @@ class CommandLineInterface:
                 import eeprom
 
         try:
+            # 交互模式下若设备已打开，则复用并补齐从属对象
+            if self.ch341 and getattr(self.ch341, 'is_opened', False):
+                try:
+                    if self.ina226 is None:
+                        ina226_addr = self._parse_address(args.ina226_addr)
+                        self.ina226 = ina226.INA226(self.ch341, ina226_addr, args.shunt_resistance)
+                    if self.eeprom is None:
+                        eeprom_addr = self._parse_address(args.eeprom_addr)
+                        self.eeprom = eeprom.EEPROM(self.ch341, eeprom_addr, args.eeprom_type)
+                except Exception:
+                    pass
+                return True
+
             # 检查CH341设备
             device_count = ch341.get_device_count()
             if device_count == 0:
@@ -228,8 +263,14 @@ class CommandLineInterface:
     
     def _cleanup_devices(self):
         """清理设备资源"""
+        # 交互模式中不在每个命令后关闭，等待REPL结束统一清理
+        if self._interactive_active:
+            return
         if self.ch341:
-            self.ch341.close()
+            try:
+                self.ch341.close()
+            except Exception:
+                pass
     
     def cmd_scan(self, args) -> int:
         """扫描设备命令"""
@@ -240,9 +281,9 @@ class CommandLineInterface:
         except ImportError:
             # 如果直接导入失败，尝试相对导入
             try:
-                from . import ch341
-                from . import ina226
-                from . import eeprom
+                from . import ch341  # type: ignore
+                from . import ina226  # type: ignore
+                from . import eeprom  # type: ignore
             except ImportError:
                 # 最后尝试添加当前目录到路径
                 import sys
@@ -570,6 +611,164 @@ class CommandLineInterface:
         finally:
             self._cleanup_devices()
     
+    def cmd_gpio(self, args) -> int:
+        """GPIO 控制与查询命令"""
+        if not self._init_devices(args):
+            return 1
+        try:
+            action = getattr(args, 'gpio_action', None)
+            if not action:
+                self._print_error('未指定GPIO操作 (list|get|set|toggle|dir|watch)')
+                return 1
+
+            # 获取支持的GPIO列表
+            try:
+                gpios = list(getattr(self.ch341, 'supported_gpios', []) or [])
+            except Exception:
+                gpios = []
+
+            if action == 'list':
+                if gpios:
+                    print('可用GPIO: ' + ', '.join(gpios))
+                else:
+                    print('未获取到GPIO列表')
+                return 0
+
+            # 对 get/set 操作进行引脚规范化与校验
+            pin_raw = getattr(args, 'pin', None)
+            if not pin_raw:
+                self._print_error('必须提供 --pin')
+                return 1
+            pin = self._normalize_gpio_pin(pin_raw)
+            if gpios and pin not in gpios:
+                self._print_error(f"不支持的GPIO引脚: {pin}. 可用: {', '.join(gpios)}")
+                return 1
+
+            if action == 'get':
+                try:
+                    val = self.ch341.get_gpio(pin)
+                    state = '高(1)' if val else '低(0)'
+                    print(f"{pin}: {state}")
+                    return 0
+                except Exception as e:
+                    self._print_error(f"读取失败: {e}")
+                    return 1
+
+            if action == 'set':
+                v = str(getattr(args, 'value', '')).lower()
+                high_values = {'1', 'high', 'true'}
+                low_values = {'0', 'low', 'false'}
+                if v not in high_values | low_values:
+                    self._print_error('无效的 --value, 需为 0/1/low/high/false/true')
+                    return 1
+                target = v in high_values
+                direction = getattr(args, 'direction', 'out')
+                try:
+                    if direction and hasattr(self.ch341, 'init_gpio'):
+                        self.ch341.init_gpio(pin, direction)
+                except Exception:
+                    # 忽略方向设置失败，仍尝试设置电平
+                    pass
+                try:
+                    self.ch341.set_gpio(pin, target)
+                    # 读回确认
+                    try:
+                        rb = self.ch341.get_gpio(pin)
+                        state = '高(1)' if rb else '低(0)'
+                        print(f"{pin} 已设置为 {state}")
+                    except Exception:
+                        print(f"{pin} 已设置为 {'高(1)' if target else '低(0)'}")
+                    return 0
+                except Exception as e:
+                    self._print_error(f"设置失败: {e}")
+                    return 1
+
+            if action == 'toggle':
+                try:
+                    cur = self.ch341.get_gpio(pin)
+                except Exception as e:
+                    self._print_error(f"读取当前电平失败: {e}")
+                    return 1
+                target = not bool(cur)
+                try:
+                    # 确保为输出
+                    try:
+                        if hasattr(self.ch341, 'init_gpio'):
+                            self.ch341.init_gpio(pin, 'out')
+                    except Exception:
+                        pass
+                    self.ch341.set_gpio(pin, target)
+                    rb = self.ch341.get_gpio(pin)
+                    state = '高(1)' if rb else '低(0)'
+                    print(f"{pin} 翻转 -> {state}")
+                    return 0
+                except Exception as e:
+                    self._print_error(f"翻转失败: {e}")
+                    return 1
+
+            if action == 'dir':
+                dir_action = getattr(args, 'dir_action', None)
+                if dir_action != 'set':
+                    self._print_error('需指定 dir set --pin ... --value in|out')
+                    return 1
+                val = str(getattr(args, 'value', '')).lower()
+                if val not in {'in', 'out'}:
+                    self._print_error('方向必须为 in 或 out')
+                    return 1
+                try:
+                    if hasattr(self.ch341, 'init_gpio'):
+                        ok = self.ch341.init_gpio(pin, val)
+                    else:
+                        ok = False
+                    if not ok:
+                        self._print_error('设置方向失败')
+                        return 1
+                    print(f"{pin} 方向已设置为 {val}")
+                    return 0
+                except Exception as e:
+                    self._print_error(f"设置方向异常: {e}")
+                    return 1
+
+            if action == 'watch':
+                interval = float(getattr(args, 'interval', 0.5) or 0.5)
+                max_time = getattr(args, 'time', None)
+                max_samples = getattr(args, 'samples', None)
+                changes_only = bool(getattr(args, 'changes_only', False))
+                if max_time and max_samples:
+                    self._print_error('不能同时指定 --time 与 --samples')
+                    return 1
+                count = 0
+                start = time.time()
+                last = None
+                try:
+                    print(f"开始监视 {pin} (间隔 {interval}s){'，仅变化输出' if changes_only else ''}")
+                    while True:
+                        try:
+                            val = self.ch341.get_gpio(pin)
+                        except Exception as e:
+                            self._print_error(f"读取失败: {e}")
+                            return 1
+                        if last is None or (not changes_only) or (val != last):
+                            ts = time.strftime('%H:%M:%S')
+                            state = '高(1)' if val else '低(0)'
+                            print(f"{ts} {pin}={state}")
+                            last = val
+                        count += 1
+                        if max_samples and count >= max_samples:
+                            break
+                        if max_time and (time.time() - start) >= max_time:
+                            break
+                        time.sleep(interval)
+                    return 0
+                except KeyboardInterrupt:
+                    print("\n已停止监视")
+                    return 0
+
+            self._print_error('未知的GPIO操作')
+            return 1
+        finally:
+            self._cleanup_devices()
+
     def cmd_power(self, args) -> int:
         """电源控制命令"""
         if not self._init_devices(args):
@@ -632,9 +831,119 @@ class CommandLineInterface:
             return 1
         finally:
             self._cleanup_devices()
+
+    def _repl(self, base_args) -> int:
+        """交互式命令行：复用全局参数，连续执行子命令"""
+        # 启动交互模式并初始化一次设备
+        self._interactive_active = True
+        if not self._init_devices(base_args):
+            self._interactive_active = False
+            return 1
+        # 构造基础全局参数（优先放在前面，后续输入覆盖）
+        base_argv = []
+        try:
+            if getattr(base_args, 'verbose', False):
+                base_argv.append('--verbose')
+            if getattr(base_args, 'device_index', None) is not None:
+                base_argv += ['--device-index', str(base_args.device_index)]
+            if getattr(base_args, 'ina226_addr', None):
+                base_argv += ['--ina226-addr', str(base_args.ina226_addr)]
+            if getattr(base_args, 'eeprom_addr', None):
+                base_argv += ['--eeprom-addr', str(base_args.eeprom_addr)]
+            if getattr(base_args, 'eeprom_type', None):
+                base_argv += ['--eeprom-type', str(base_args.eeprom_type)]
+            if getattr(base_args, 'shunt_resistance', None) is not None:
+                base_argv += ['--shunt-resistance', str(base_args.shunt_resistance)]
+            if getattr(base_args, 'max_current', None) is not None:
+                base_argv += ['--max-current', str(base_args.max_current)]
+        except Exception:
+            pass
+
+        print(f"{Fore.BLUE}进入交互式模式 (输入 help 查看帮助, exit/quit 退出){Style.RESET_ALL}")
+        while True:
+            try:
+                line = input('power-box> ').strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not line:
+                continue
+            if line.lower() in ('exit', 'quit', 'q'):
+                break
+            if line.lower() in ('help', 'h', '?'):
+                print('示例:')
+                print('  scan')
+                print('  info')
+                print('  measure --format json')
+                print('  monitor -t 5 -i 0.5')
+                print('  eeprom read 0x00 16 --format hex')
+                print('  power --pin GPIO1 on')
+                print('  power status')
+                print('  gpio list')
+                print('  gpio get --pin GPIO1')
+                print('  gpio set --pin GPIO1 --value 1 --direction out')
+                print('  gpio toggle --pin GPIO1')
+                print('  gpio dir set --pin GPIO1 --value out')
+                print('  gpio watch --pin GPIO1 -i 0.5 --changes-only')
+                continue
+
+            try:
+                tokens = shlex.split(line)
+            except ValueError as e:
+                self._print_error(f"解析命令失败: {e}")
+                continue
+
+            try:
+                # 组合基础参数 + 本次命令；不带 --interactive
+                argv = [*base_argv, *tokens]
+                args = self.parser.parse_args(argv)
+
+                # 设置日志级别（允许在 REPL 中切换 -v 时生效）
+                if getattr(args, 'verbose', False):
+                    logging.getLogger().setLevel(logging.DEBUG)
+                else:
+                    logging.getLogger().setLevel(logging.WARNING)
+
+                if not args.command:
+                    self.parser.print_help()
+                    continue
+
+                command_map = {
+                    'scan': self.cmd_scan,
+                    'info': self.cmd_info,
+                    'measure': self.cmd_measure,
+                    'monitor': self.cmd_monitor,
+                    'board-id': self.cmd_board_id,
+                    'eeprom': self.cmd_eeprom,
+                    'power': self.cmd_power,
+                    'gpio': self.cmd_gpio,
+                }
+
+                if args.command in command_map:
+                    rc = command_map[args.command](args)
+                    if rc not in (0, None):
+                        print(f"退出码: {rc}")
+                else:
+                    self._print_error(f"未知命令: {args.command}")
+            except SystemExit:
+                # argparse 在错误时会调用 sys.exit；在 REPL 中捕获并继续
+                continue
+            except Exception as e:
+                self._print_error(f"执行失败: {e}")
+
+        # 退出与清理
+        print(f"{Fore.BLUE}退出交互式模式{Style.RESET_ALL}")
+        self._interactive_active = False
+        try:
+            self._cleanup_devices()
+        except Exception:
+            pass
+        return 0
     
     def run(self, argv=None) -> int:
         """运行命令行接口"""
+        args = None
         try:
             args = self.parser.parse_args(argv)
             
@@ -644,6 +953,10 @@ class CommandLineInterface:
             else:
                 logging.getLogger().setLevel(logging.WARNING)
             
+            # 交互式模式
+            if getattr(args, 'interactive', False):
+                return self._repl(args)
+
             # 检查命令
             if not args.command:
                 self.parser.print_help()
@@ -658,6 +971,7 @@ class CommandLineInterface:
                 'board-id': self.cmd_board_id,
                 'eeprom': self.cmd_eeprom,
                 'power': self.cmd_power,
+                'gpio': self.cmd_gpio,
             }
             
             if args.command in command_map:
@@ -671,7 +985,7 @@ class CommandLineInterface:
             return 1
         except Exception as e:
             self._print_error(f"程序异常: {e}")
-            if args.verbose:
+            if args is not None and getattr(args, 'verbose', False):
                 import traceback
                 traceback.print_exc()
             return 1
