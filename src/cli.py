@@ -32,10 +32,10 @@ class CommandLineInterface:
     """命令行接口类"""
     
     def __init__(self):
-        self.parser = None
-        self.ch341 = None
-        self.ina226 = None
-        self.eeprom = None
+        self.parser: Any = None
+        self.ch341: Any = None
+        self.ina226: Any = None
+        self.eeprom: Any = None
         self._interactive_active = False
         
         self._setup_parser()
@@ -57,6 +57,8 @@ class CommandLineInterface:
   %(prog)s power on                      # 打开电源
   %(prog)s power off                     # 关闭电源
   %(prog)s power status                  # 查看电源状态
+    %(prog)s mode --set auto --vbus 3.3   # 设置自动量程与名义Vbus
+    %(prog)s calib --input-ohms 10        # 计算等效阻值(基于Vshunt/Vbus)
             '''
         )
 
@@ -84,6 +86,8 @@ class CommandLineInterface:
         # measure命令
         measure_parser = subparsers.add_parser('measure', help='单次测量')
         measure_parser.add_argument('--format', choices=['table', 'json', 'csv'], default='table', help='输出格式')
+        measure_parser.add_argument('--mode', choices=['fixed', 'auto'], help='测量量程模式：fixed 或 auto-range')
+        measure_parser.add_argument('--vbus', type=float, help='名义Vbus电压，用于PMOS内阻映射')
 
         # monitor命令
         monitor_parser = subparsers.add_parser('monitor', help='连续监测')
@@ -92,6 +96,8 @@ class CommandLineInterface:
         monitor_parser.add_argument('-i', '--interval', type=float, default=1.0, help='监测间隔/秒 (默认: 1.0)')
         monitor_parser.add_argument('-f', '--file', type=str, help='保存数据到文件')
         monitor_parser.add_argument('--format', choices=['table', 'json', 'csv'], default='table', help='输出格式')
+        monitor_parser.add_argument('--mode', choices=['fixed', 'auto'], help='测量量程模式：fixed 或 auto-range')
+        monitor_parser.add_argument('--vbus', type=float, help='名义Vbus电压，用于PMOS内阻映射')
 
         # board-id命令
         board_id_parser = subparsers.add_parser('board-id', help='板卡ID操作')
@@ -162,6 +168,19 @@ class CommandLineInterface:
         gpio_watch.add_argument('-t', '--time', type=float, help='持续时间秒')
         gpio_watch.add_argument('-n', '--samples', type=int, help='采样次数')
         gpio_watch.add_argument('--changes-only', action='store_true', help='仅在电平变化时输出')
+
+        # 顶层 mode 命令（等同 ina226 mode）
+        mode_parser = subparsers.add_parser('mode', help='设置/查询量程模式（简写）')
+        mode_parser.add_argument('--set', choices=['fixed', 'auto'], help='设置模式：fixed 或 auto')
+        mode_parser.add_argument('--vbus', type=float, help='名义Vbus电压')
+
+        # 顶层 calib 命令（统一计算等效阻值）
+        calib_parser = subparsers.add_parser('calib', help='根据 Vshunt/Vbus 与已知输入电阻计算等效阻值')
+        calib_parser.add_argument('--input-ohms', type=float, required=True, help='输入/负载电阻(Ω)，用于比例计算')
+        calib_parser.add_argument('--samples', type=int, default=8, help='采样次数用于平均 (默认: 8)')
+        calib_parser.add_argument('--interval', type=float, default=0.05, help='采样间隔秒 (默认: 0.05)')
+        calib_parser.add_argument('--alert-pin', type=str, default='GPIO0', help='用于读取ALERT状态的GPIO引脚 (默认: GPIO0)')
+        calib_parser.add_argument('--read-alert', action='store_true', help='读取ALERT状态用于解释结果（默认不读取，以免干扰调试）')
     
     def _parse_address(self, addr_str: str) -> int:
         """解析地址字符串（支持十六进制）"""
@@ -378,6 +397,14 @@ class CommandLineInterface:
             if not self.ina226.initialize(args.max_current):
                 self._print_error("INA226初始化失败")
                 return 1
+            # 可选的量程模式设置（不再涉及阈值）
+            try:
+                if getattr(args, 'mode', None):
+                    mode = 'auto-range' if args.mode == 'auto' else 'fixed'
+                    vbus = getattr(args, 'vbus', None)
+                    self.ina226.set_measurement_mode(mode, vbus_nominal=vbus)
+            except Exception as e:
+                self._print_warning(f"设置量程模式失败: {e}")
             
             data = self.ina226.read_all()
             if not data:
@@ -419,6 +446,14 @@ class CommandLineInterface:
             if not self.ina226.initialize(args.max_current):
                 self._print_error("INA226初始化失败")
                 return 1
+            # 可选的量程模式设置（不再涉及阈值）
+            try:
+                if getattr(args, 'mode', None):
+                    mode = 'auto-range' if args.mode == 'auto' else 'fixed'
+                    vbus = getattr(args, 'vbus', None)
+                    self.ina226.set_measurement_mode(mode, vbus_nominal=vbus)
+            except Exception as e:
+                self._print_warning(f"设置量程模式失败: {e}")
             
             # 确定监测参数
             if args.time and args.samples:
@@ -832,6 +867,123 @@ class CommandLineInterface:
         finally:
             self._cleanup_devices()
 
+
+    def cmd_mode(self, args) -> int:
+        """顶层模式设置命令，等同于 `ina226 mode`"""
+        if not self._init_devices(args):
+            return 1
+        try:
+            if not self.ina226.check_device():
+                self._print_error("INA226设备未检测到")
+                return 1
+            if not self.ina226.initialize(getattr(args, 'max_current', 0.8192)):
+                self._print_error("INA226初始化失败")
+                return 1
+            set_mode = getattr(args, 'set', None)
+            vbus = getattr(args, 'vbus', None)
+            if set_mode:
+                mode = 'auto-range' if set_mode == 'auto' else 'fixed'
+                ok = self.ina226.set_measurement_mode(mode, vbus_nominal=vbus)
+                if not ok:
+                    self._print_error('设置量程模式失败')
+                    return 1
+                self._print_success(f"已设置模式: {mode}, Vbus: {vbus if vbus is not None else self.ina226.vbus_nominal}V")
+            # 显示当前状态
+            mode_cur = getattr(self.ina226, 'measurement_mode', 'fixed')
+            print(f"当前模式: {mode_cur}")
+            print(f"名义Vbus(V): {self.ina226.vbus_nominal}")
+            try:
+                rmap = getattr(self.ina226, 'pmos_r_on_map', {})
+                print(f"PMOS内阻映射: {json.dumps(rmap, ensure_ascii=False)}")
+            except Exception:
+                pass
+            lrs = getattr(self.ina226, '_last_range_state', None)
+            if lrs:
+                print(f"最近量程判定: {lrs}")
+            return 0
+        finally:
+            self._cleanup_devices()
+
+    def cmd_calib(self, args) -> int:
+        """统一校准：计算等效阻值 R_eq。
+        - ALERT=高: R_eq 即为 Rshunt
+        - ALERT=低: R_eq 为 Rpmos||Rshunt
+        """
+        if not self._init_devices(args):
+            return 1
+        try:
+            if not self.ina226.check_device():
+                self._print_error("INA226设备未检测到")
+                return 1
+            if not self.ina226.initialize(getattr(args, 'max_current', 0.8192)):
+                self._print_error("INA226初始化失败")
+                return 1
+
+            rin = float(getattr(args, 'input_ohms'))
+            samples = int(getattr(args, 'samples', 8) or 8)
+            interval = float(getattr(args, 'interval', 0.05) or 0.05)
+            alert_pin = self._normalize_gpio_pin(getattr(args, 'alert_pin', 'GPIO0'))
+
+            # 切换为固定量程以避免量程切换影响测量稳定性
+            prev_mode = getattr(self.ina226, 'measurement_mode', 'fixed')
+            prev_vbus = getattr(self.ina226, 'vbus_nominal', None)
+            try:
+                if prev_mode != 'fixed':
+                    try:
+                        self.ina226.set_measurement_mode('fixed')
+                    except Exception:
+                        pass
+
+                vs_sum = 0.0
+                vb_sum = 0.0
+                taken = 0
+                for i in range(max(1, samples)):
+                    data = self.ina226.read_all()
+                    if not data:
+                        continue
+                    vs_sum += float(data.get('shunt_voltage', 0.0))
+                    vb_sum += float(data.get('bus_voltage', 0.0))
+                    taken += 1
+                    if i < samples - 1:
+                        time.sleep(interval)
+                if taken == 0:
+                    self._print_error('未能获得有效测量值')
+                    return 1
+                vshunt = vs_sum / taken
+                vbus = vb_sum / taken
+                if vbus == 0 or abs(vbus) < 1e-6:
+                    self._print_error('Vbus测得为0，无法计算')
+                    return 1
+                req = rin * (vshunt / vbus)
+
+                # 可选：读取 ALERT 状态（高=1，低=0）；默认不读取以避免干扰外部拉低调试
+                alert_state = None
+                if bool(getattr(args, 'read_alert', False)):
+                    try:
+                        if hasattr(self.ch341, 'get_gpio'):
+                            alert_state = bool(self.ch341.get_gpio(alert_pin))
+                    except Exception:
+                        alert_state = None
+
+                print(f"采样次数: {taken}")
+                print(f"平均 Vshunt: {vshunt:.9f} V, 平均 Vbus: {vbus:.6f} V")
+                self._print_success(f"计算得到 等效阻值 R_eq ≈ {req:.9f} Ω (Rin={rin}Ω)")
+
+                if alert_state is True:
+                    print('ALERT=高 -> R_eq 代表 Rshunt')
+                elif alert_state is False:
+                    print('ALERT=低 -> R_eq 代表 Rpmos 与 Rshunt 的并联值')
+
+                return 0
+            finally:
+                try:
+                    if prev_mode != 'fixed':
+                        self.ina226.set_measurement_mode(prev_mode, vbus_nominal=prev_vbus)
+                except Exception:
+                    pass
+        finally:
+            self._cleanup_devices()
+
     def _repl(self, base_args) -> int:
         """交互式命令行：复用全局参数，连续执行子命令"""
         # 启动交互模式并初始化一次设备
@@ -886,6 +1038,8 @@ class CommandLineInterface:
                 print('  gpio toggle --pin GPIO1')
                 print('  gpio dir set --pin GPIO1 --value out')
                 print('  gpio watch --pin GPIO1 -i 0.5 --changes-only')
+                print('  mode --set auto --vbus 3.3')
+                print('  calib --input-ohms 10 --samples 16')
                 continue
 
             try:
@@ -918,6 +1072,8 @@ class CommandLineInterface:
                     'eeprom': self.cmd_eeprom,
                     'power': self.cmd_power,
                     'gpio': self.cmd_gpio,
+                    'mode': self.cmd_mode,
+                    'calib': self.cmd_calib,
                 }
 
                 if args.command in command_map:
@@ -972,6 +1128,8 @@ class CommandLineInterface:
                 'eeprom': self.cmd_eeprom,
                 'power': self.cmd_power,
                 'gpio': self.cmd_gpio,
+                'mode': self.cmd_mode,
+                'calib': self.cmd_calib,
             }
             
             if args.command in command_map:

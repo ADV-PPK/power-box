@@ -108,6 +108,20 @@ class INA226:
         self.current_lsb = 0.0
         self.power_lsb = 0.0
         self.calibration_value = 0
+        # 量程与PMOS自定义参数
+        self.measurement_mode: str = 'fixed'  # 'fixed' | 'auto-range'
+        self.alert_threshold_mv: float = 40.0
+        self.vbus_nominal: float = 3.3
+        # PMOS导通内阻按Vbus映射，默认3.3V时0.1Ω，可通过校准更新
+        self.pmos_r_on_map: Dict[float, float] = {3.3: 0.1}
+        # 上一次判定的量程状态（仅用于估计）: 'low' 使用R_shunt, 'high' 使用并联R
+        self._last_range_state: Optional[str] = None
+        # 首次读取前等待一次转换就绪，避免第一次读到0
+        self._first_read_done = False
+
+    # INA226 Mask/Enable 寄存器常量（近似，供配置ALERT使用）
+    MASK_SOL_ENABLE = 0x8000  # 使能分流电压过压告警（Shunt Over-Voltage）
+    MASK_ALERT_LATCH = 0x0004  # Latch 使能（实际位可能不同，按需调整）
         
     def _write_register(self, reg: int, value: int) -> bool:
         """
@@ -165,6 +179,137 @@ class INA226:
             time.sleep(0.01)  # 10ms
             return True
         return False
+
+    def _mv_to_shunt_counts(self, threshold_mv: float) -> int:
+        """将mV阈值转换为INA226的分流电压寄存器计数（LSB=2.5µV）"""
+        counts = int((threshold_mv * 1e-3) / 2.5e-6)
+        # 限制在16位有符号范围
+        if counts > 0x7FFF:
+            counts = 0x7FFF
+        if counts < -0x8000:
+            counts = -0x8000
+        return counts & 0xFFFF
+
+    def _wait_conversion_ready(self, timeout: float = 0.05) -> bool:
+        """等待一次转换完成（CNVR=1），超时返回False"""
+        end_t = time.time() + max(0.0, timeout)
+        CNVR_BIT = 0x0008
+        while time.time() < end_t:
+            val = self._read_register(self.REG_MASK_ENABLE)
+            if val is not None and (val & CNVR_BIT):
+                return True
+            time.sleep(0.001)
+        return False
+
+    def _configure_alert_shunt_overvoltage(self, threshold_mv: float, latch: bool = True) -> bool:
+        """配置ALERT在分流电压超过阈值时触发，用于PMOS导通控制"""
+        try:
+            mask = self.MASK_SOL_ENABLE
+            if latch:
+                mask |= self.MASK_ALERT_LATCH
+            ok = self._write_register(self.REG_MASK_ENABLE, mask)
+            ok2 = self._write_register(self.REG_ALERT_LIMIT, self._mv_to_shunt_counts(threshold_mv))
+            return bool(ok and ok2)
+        except Exception as e:
+            logger.error(f"配置ALERT异常: {e}")
+            return False
+
+    def set_measurement_mode(self, mode: str, *, threshold_mv: Optional[float] = None, vbus_nominal: Optional[float] = None, latch: bool = True) -> bool:
+        """
+        设置工作模式
+
+        Args:
+            mode: 'fixed' 固定10Ω量程 | 'auto-range' 基于ALERT切换量程
+            threshold_mv: 在auto-range下的分流电压阈值（mV），超过则ALERT低拉使PMOS导通
+            vbus_nominal: 名义Vbus（用于选择PMOS R_on映射的key）
+            latch: 是否使能告警锁存
+        """
+        mode = mode.lower()
+        if mode not in ('fixed', 'auto-range'):
+            logger.error("mode 需为 'fixed' 或 'auto-range'")
+            return False
+        if vbus_nominal is not None:
+            self.vbus_nominal = float(vbus_nominal)
+        if threshold_mv is not None:
+            self.alert_threshold_mv = float(threshold_mv)
+        self.measurement_mode = mode
+        if mode == 'auto-range':
+            return self._configure_alert_shunt_overvoltage(self.alert_threshold_mv, latch=latch)
+        else:
+            # 固定模式：关闭SOL功能（将掩码写0）
+            try:
+                return self._write_register(self.REG_MASK_ENABLE, 0x0000)
+            except Exception:
+                return True
+
+    def set_pmos_r_on(self, vbus: float, r_on_ohm: float) -> None:
+        """设置/更新指定Vbus下的PMOS导通内阻映射"""
+        if r_on_ohm <= 0:
+            raise INA226Exception("PMOS导通内阻必须为正数")
+        self.pmos_r_on_map[float(vbus)] = float(r_on_ohm)
+
+    def get_effective_shunt(self, vbus: Optional[float] = None, assume_high: Optional[bool] = None) -> float:
+        """
+        获取当前有效的分流电阻
+        在auto-range下，若assume_high为True则返回并联后的等效电阻；否则返回基础分流电阻。
+        这里不读取ALERT引脚状态，留作后续扩展（可通过GPIO或寄存器标志判定）。
+        """
+        if self.measurement_mode != 'auto-range':
+            return self.shunt_resistance
+        vkey = float(self.vbus_nominal if vbus is None else vbus)
+        r_pmos = self.pmos_r_on_map.get(vkey, self.pmos_r_on_map.get(3.3, 0.1))
+        if not assume_high:
+            return self.shunt_resistance
+        # 并联等效
+        r_low = self.shunt_resistance
+        r_eff = (r_low * r_pmos) / (r_low + r_pmos)
+        return r_eff
+
+    def calibrate_pmos_r_on(self, known_load_ohms: float, *, vbus_nominal: Optional[float] = None, force_threshold_mv: float = 0.5, settle_time: float = 0.2) -> Optional[float]:
+        """
+        通过已知负载校准PMOS导通内阻（在指定Vbus下）
+
+        步骤：
+        1) 将ALERT阈值设置得很低（force_threshold_mv），确保PMOS导通
+        2) 等待稳定后，读取总线电压Vbus与分流电压Vshunt
+        3) 由 I = Vbus / R_load 得到电流，计算等效分流电阻 R_eff = Vshunt / I
+        4) 由 R_eff 与 R_shunt 反求 PMOS内阻 R_on
+        5) 存入映射表（key为vbus_nominal）
+        """
+        if known_load_ohms <= 0:
+            raise INA226Exception("已知负载阻值必须为正数")
+        vkey = float(self.vbus_nominal if vbus_nominal is None else vbus_nominal)
+        prev_mode = self.measurement_mode
+        prev_threshold = self.alert_threshold_mv
+        try:
+            # 强制进入auto-range并设置极低阈值，让PMOS导通
+            self.set_measurement_mode('auto-range', threshold_mv=force_threshold_mv, vbus_nominal=vkey, latch=True)
+            time.sleep(settle_time)
+            vbus = self.read_bus_voltage()
+            vshunt = self.read_shunt_voltage()
+            if vbus is None or vshunt is None:
+                logger.error("校准读取失败：Vbus或Vshunt为空")
+                return None
+            i_load = vbus / known_load_ohms
+            if i_load <= 0:
+                logger.error("校准失败：电流为零或负")
+                return None
+            r_eff = vshunt / i_load
+            r_shunt = self.shunt_resistance
+            if r_eff >= r_shunt:
+                logger.error("校准失败：等效电阻应小于基准分流电阻")
+                return None
+            r_on = (r_eff * r_shunt) / (r_shunt - r_eff)
+            # 保存映射
+            self.pmos_r_on_map[vkey] = r_on
+            logger.info(f"校准完成：Vbus={vkey}V, PMOS R_on≈{r_on:.6f}Ω (R_eff≈{r_eff:.6f}Ω)")
+            return r_on
+        finally:
+            # 恢复原模式/阈值
+            if prev_mode == 'auto-range':
+                self.set_measurement_mode('auto-range', threshold_mv=prev_threshold, vbus_nominal=vkey)
+            else:
+                self.set_measurement_mode('fixed')
     
     def check_device(self, silent: bool = False) -> bool:
         """
@@ -324,21 +469,38 @@ class INA226:
             dict: 包含所有测量值的字典，失败返回None
         """
         try:
+            if not self._first_read_done:
+                # 等待一次转换完成，避免初始化后第一次读到0
+                self._wait_conversion_ready(timeout=0.06)
             shunt_voltage = self.read_shunt_voltage()
             bus_voltage = self.read_bus_voltage()
-            current = self.read_current()
-            power = self.read_power()
-            
-            if all(v is not None for v in [shunt_voltage, bus_voltage, current, power]):
-                return {
-                    'shunt_voltage': shunt_voltage,
-                    'bus_voltage': bus_voltage,
-                    'current': current,
-                    'power': power,
-                    'load_voltage': bus_voltage + shunt_voltage # type: ignore
-                }
-            else:
+            if shunt_voltage is None or bus_voltage is None:
                 return None
+            # 在auto-range下，基于等效分流电阻计算电流与功率；否则沿用芯片寄存器换算
+            if self.measurement_mode == 'auto-range':
+                # 估计是否处于高量程：简单策略，若设定阈值存在，则以阈值为界近似判断
+                # 因为PMOS导通后Vshunt会显著降低，这里使用“低于阈值的较小比例”作为高量程的迹象
+                assume_high = shunt_voltage < (self.alert_threshold_mv * 1e-3 * 0.6)
+                r_eff = self.get_effective_shunt(vbus=self.vbus_nominal, assume_high=assume_high)
+                current = shunt_voltage / r_eff
+                power = current * bus_voltage
+                self._last_range_state = 'high' if assume_high else 'low'
+            else:
+                current = self.read_current()
+                power = self.read_power()
+                if current is None or power is None:
+                    return None
+            
+            return {
+                'shunt_voltage': shunt_voltage,
+                'bus_voltage': bus_voltage,
+                'current': current,
+                'power': power,
+                'load_voltage': bus_voltage + shunt_voltage # type: ignore
+            }
+            
+            # 标记首次读取已完成
+            self._first_read_done = True
                 
         except Exception as e:
             logger.error(f"读取所有数据异常: {e}")
@@ -374,6 +536,21 @@ class INA226:
         # 4. 校准设备
         if not self.calibrate(max_current):
             return False
+        
+        # 5. 若启用了 auto-range，重新配置ALERT阈值
+        try:
+            if getattr(self, 'measurement_mode', 'fixed') == 'auto-range':
+                self._configure_alert_shunt_overvoltage(getattr(self, 'alert_threshold_mv', 40.0), latch=True)
+        except Exception:
+            # 忽略告警配置失败，不影响基本测量
+            pass
+        
+        # 首次读取前的预热等待一次转换完成
+        try:
+            self._first_read_done = False
+            self._wait_conversion_ready(timeout=0.06)
+        except Exception:
+            pass
         
         logger.info("INA226初始化完成")
         return True

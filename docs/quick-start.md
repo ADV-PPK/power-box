@@ -141,6 +141,33 @@ gpio set --pin GPIO1 --value 1
 gpio watch --pin GPIO1 -i 0.2 --changes-only
 ```
 
+### 量程模式与校准
+
+设置/查询量程模式（INA226）：
+```cmd
+power-box.exe mode                 
+power-box.exe mode --set auto --vbus 3.3
+power-box.exe mode --set fixed
+```
+
+测量命令也支持带入模式/名义Vbus：
+```cmd
+power-box.exe measure --mode auto --vbus 3.3
+power-box.exe monitor -t 5 --mode fixed
+```
+
+统一校准命令：
+```cmd
+power-box.exe calib --input-ohms 10 --samples 16 --interval 0.05
+# 可选：读取 ALERT 解释结果（默认不读取）
+power-box.exe calib --input-ohms 10 --read-alert
+```
+若能读取 ALERT：ALERT=高 => Rshunt；ALERT=低 => Rpmos||Rshunt。
+
+提示：如果将 CH341 的 `P0` 与 INA226 的 `ALERT` 相连，则：
+- 调试时可通过外部拉低 `P0` 来模拟阈值切换；
+- 量产时将 `P0` 作为输入用于检测 `ALERT`，CLI 不提供阈值调节参数。
+
 ## 常见问题
 
 ### Q: 提示"未检测到CH341设备"

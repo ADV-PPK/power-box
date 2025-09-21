@@ -26,6 +26,8 @@
   - GPIO直接控制
   - PCF8574 I2C扩展器支持
   - 电源开关和脉冲控制
+  
+ 备注：当前CLI以 `power`/`gpio` 为主要控制入口；量程与校准通过 `mode`/`calib` 命令实现。
 
 ### ✅ 用户界面
 - **命令行接口** (`src/cli.py`)
@@ -143,6 +145,14 @@ pyinstaller power-box.spec
 | `board-id` | 板卡ID操作 | `power-box board-id -w "PWR-001"` |
 | `eeprom` | EEPROM操作 | `power-box eeprom dump` |
 | `relay` | 继电器控制 | `power-box relay on` |
+
+新增命令（当前版本）：
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `mode` | 设置/查询INA226量程模式 | `power-box mode --set auto --vbus 3.3` |
+| `calib pmos` | 校准PMOS内阻映射 | `power-box calib pmos --load-ohms 10 --vbus 3.3` |
+| `calib shunt` | 校准分流电阻Rshunt | `power-box calib shunt --input-ohms 10 --apply` |
 
 ## 🔍 故障排除
 

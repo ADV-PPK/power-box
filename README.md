@@ -6,18 +6,24 @@
 
 - **电流/电压测量**: 使用 INA226 高精度电流传感器进行测量
 - **EEPROM 访问**: 读取/写入板卡唯一识别码
-- **电源控制/GPIO**: 通过GPIO控制被测电源的开关，提供丰富的GPIO操作
-- **命令行接口**: 提供完整的命令行操作界面
 - **数据记录**: 支持连续监测和数据保存
 
 ## 硬件要求
 
 - CH341 USB转I2C适配器
-- INA226 电流监测芯片
-- I2C EEPROM (24C02/24C04/24C08/24C16/24C32/24C64等)
-- 继电器控制电路 (GPIO直接控制或PCF8574扩展)
-
-## 软件依赖
+### 校准
+在稳定接线与恒定负载条件下执行统一校准：
+```bash
+python src/main.py calib --input-ohms 10 --samples 16 --interval 0.05
+# 可选：读取 ALERT 进行结果解释（默认不读取以避免干扰调试）
+python src/main.py calib --input-ohms 10 --read-alert
+```
+- 基于比例关系 R_eq/Rin = Vshunt/Vbus 计算等效阻值 R_eq。
+- 若能读取 CH341 `P0`(或指定引脚) 与 INA226 `ALERT` 的连线状态：
+   - ALERT=高: R_eq 即 Rshunt
+   - ALERT=低: R_eq 为 Rpmos 与 Rshunt 的并联
+- `--read-alert`: 可选，读取 `ALERT` 状态用于解释结果；默认不读取以避免将用于调试的输出引脚切换为输入。
+- `--alert-pin`: 可选，指定 `ALERT` 读取引脚（默认 `GPIO0`）。
 
 - Python 3.8+
 - pyusb
@@ -118,6 +124,31 @@ python src/main.py gpio dir set --pin GPIO1 --value out
 # 监视电平变化
 python src/main.py gpio watch --pin GPIO1 -i 0.5 --changes-only
 ```
+
+### 量程模式（INA226）
+```bash
+# 查看当前模式与名义Vbus
+python src/main.py mode
+
+# 设置为自动量程，并指定名义Vbus（用于PMOS内阻映射）
+python src/main.py mode --set auto --vbus 3.3
+
+# 固定量程
+python src/main.py mode --set fixed
+
+```
+```
+
+测量命令也可直接带模式/名义Vbus参数：
+```bash
+python src/main.py measure --mode auto --vbus 3.3
+python src/main.py monitor -t 10 --mode fixed
+```
+
+提示：硬件连接中 CH341 的 `P0` 建议与 INA226 的 `ALERT` 相连。
+- 调试阶段：可通过外部拉低 `P0` 强制触发量程切换并观测行为。
+- 量产阶段：将 `P0` 作为输入用于检测 `ALERT` 状态；CLI 不再提供阈值相关参数。
+
 
 ### 交互式模式
 ```bash
